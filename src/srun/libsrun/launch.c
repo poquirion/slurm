@@ -322,7 +322,7 @@ extern int launch_common_create_job_step(srun_job_t *job, bool use_all_cpus,
 	}
 	job->ctx_params.tres_bind = xstrdup(opt_local->tres_bind);
 	xfree(opt_local->tres_freq);	/* Vestigial value from job allocate */
-	xfmt_tres(&opt_local->tres_freq, "gpu", opt_local->gpu_freq);
+	xfmt_tres_freq(&opt_local->tres_freq, "gpu", opt_local->gpu_freq);
 	if (tres_freq_verify_cmdline(opt_local->tres_freq)) {
 		if (tres_freq_err_log) {	/* Log once */
 			error("Invalid --tres-freq argument: %s. Ignored",
@@ -332,6 +332,7 @@ extern int launch_common_create_job_step(srun_job_t *job, bool use_all_cpus,
 		xfree(opt_local->tres_freq);
 	}
 	job->ctx_params.tres_freq = xstrdup(opt_local->tres_freq);
+	job->ctx_params.tres_per_step = xstrdup(opt_local->tres_per_job);
 	xfmt_tres(&job->ctx_params.tres_per_step, "gpu", opt_local->gpus);
 	xfmt_tres(&job->ctx_params.tres_per_node, "gpu",
 		  opt_local->gpus_per_node);

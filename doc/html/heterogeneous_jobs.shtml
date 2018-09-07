@@ -350,13 +350,13 @@ respect to heterogeneous jobs.
 By default a request to cancel, hold or release a job ID that is not the
 pack_job_id, but that of a job component will only operate that one component
 of the heterogeneous job.
-If SchedulerParameters configuration parameter includes the option "whole_pack"
-then the operation would apply to all components of the job if any job component
-is specified to be operated upon. In the below example, the scancel command will
-either cancel all components of job 93 if SchedulingParameters=whole_pack is
-configured, otherwise only job 93+1 will be cancelled.
-If a specific heterogeneous job component is specified (e.g. "scancel 93+1"),
-then only that one component will be effected.</p>
+If SchedulerParameters configuration parameter includes the option
+"whole_hetjob" then the operation would apply to all components of the job if
+any job component is specified to be operated upon. In the below example, the
+scancel command will either cancel all components of job 93 if
+SchedulingParameters=whole_hetjob is configured, otherwise only job 93+1 will be
+cancelled. If a specific heterogeneous job component is specified (e.g. "scancel
+93+1"), then only that one component will be effected.</p>
 <pre>
 $ squeue --job=93
 JOBID PARTITION  NAME  USER ST  TIME  NODES NODELIST
@@ -364,8 +364,8 @@ JOBID PARTITION  NAME  USER ST  TIME  NODES NODELIST
  93+1     debug  bash  adam  R 19:18      1 nid00011
  93+2     debug  bash  adam  R 19:18      1 nid00021
 $ scancel 94 (where job ID 94 is equivalent to 93+1)
-# Cancel 93+0, 93+1 and 93+2 if SchedulerParameters includes "whole_pack"
-# Cancel only 93+1 if SchedulerParameters does not include "whole_pack"
+# Cancel 93+0, 93+1 and 93+2 if SchedulerParameters includes "whole_hetjob"
+# Cancel only 93+1 if SchedulerParameters does not include "whole_hetjob"
 </pre>
 
 <h3>Accounting</h3>
@@ -376,7 +376,12 @@ The sacct command reports job's using the format
 "&lt;pack_job_id&gt;+&lt;pack_job_offset&gt;" and can accept a job ID
 specification for filtering using the same format.
 If a pack_job_id value is specified as a job filter, then information about
-all components of that job will be reported as shown below.</p>
+all components of that job will be reported as shown below by default.
+The <i>--whole-hetjob=[yes|no]</i> option can be used to force to report
+the information about all the components of that job or just about the specific
+component requested, no matter if the job filter includes the pack_job_id
+(leader) or not.
+</p>
 
 <pre>
 $ sacct -j 67767
@@ -389,6 +394,17 @@ $  sacct -j 67767+1
   JobID JobName Partition Account AllocCPUS     State ExitCode 
 ------- ------- --------- ------- --------- --------- -------- 
 67767+1     foo     debug    test         4 COMPLETED      0:0 
+
+$  sacct -j 67767 --whole-hetjob=no
+  JobID JobName Partition Account AllocCPUS     State ExitCode
+------- ------- --------- ------- --------- --------- --------
+67767+0     foo     debug    test         4 COMPLETED      0:0
+
+$ sacct -j 67767+1 --whole-hetjob=yes
+  JobID JobName Partition Account AllocCPUS     State ExitCode
+------- ------- --------- ------- --------- --------- --------
+67767+0     foo     debug    test         2 COMPLETED      0:0
+67767+1     foo     debug    test         4 COMPLETED      0:0
 </pre>
 
 <h2><a name="job_steps">Launching Applications (Job Steps)</a></h2>
@@ -687,6 +703,6 @@ especially other heterogeneous jobs.</p>
 
 <p class="footer"><a href="#top">top</a></p>
 
-<p style="text-align:center;">Last modified 15 February 2018</p>
+<p style="text-align:center;">Last modified 13 July 2018</p>
 
 <!--#include virtual="footer.txt"-->

@@ -101,6 +101,7 @@ typedef struct slurmd_config {
 	uint16_t      cr_type;		/* Consumable Resource Type:       *
 					 * CR_SOCKET, CR_CORE, CR_MEMORY,  *
 					 * CR_DEFAULT, etc.                */
+	char         *hwloc_xml;	/* path of hwloc xml file if using */
 	time_t        last_update;	/* last update time of the
 					 * build parameters */
 	uint16_t      mem_limit_enforce; /* enforce mem limit on running job */
@@ -135,6 +136,7 @@ typedef struct slurmd_config {
 	uint64_t      debug_flags;	/* DebugFlags configured           */
 	int	      boot_time:1;      /* Report node boot time now (-b)  */
 	int           daemonize:1;	/* daemonize flag (-D)		   */
+	bool          def_config;       /* We haven't read in the config yet */
 	int	      cleanstart:1;     /* clean start requested (-c)      */
 	int           mlock_pages:1;	/* mlock() slurmd  */
 

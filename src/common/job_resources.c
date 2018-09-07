@@ -219,8 +219,10 @@ extern int build_job_resources_cpus_array(job_resources_t *job_resrcs_ptr)
  * This is needed after a restart/reconfiguration since nodes can
  * be added or removed from the system resulting in changing in
  * the bitmap size or bit positions */
-extern int reset_node_bitmap(job_resources_t *job_resrcs_ptr, uint32_t job_id)
+extern int reset_node_bitmap(void *void_job_ptr)
 {
+	struct job_record *job_ptr = (struct job_record *) void_job_ptr;
+	job_resources_t *job_resrcs_ptr = job_ptr->job_resrcs;
 	int i;
 
 	if (!job_resrcs_ptr)
@@ -231,8 +233,8 @@ extern int reset_node_bitmap(job_resources_t *job_resrcs_ptr, uint32_t job_id)
 	if (job_resrcs_ptr->nodes &&
 	    (node_name2bitmap(job_resrcs_ptr->nodes, false,
 			      &job_resrcs_ptr->node_bitmap))) {
-		error("Invalid nodes (%s) for job_id %u",
-		      job_resrcs_ptr->nodes, job_id);
+		error("Invalid nodes (%s) for %pJ",
+		      job_resrcs_ptr->nodes, job_ptr);
 		return SLURM_ERROR;
 	} else if (job_resrcs_ptr->nodes == NULL) {
 		job_resrcs_ptr->node_bitmap = bit_alloc(node_record_count);
@@ -240,8 +242,8 @@ extern int reset_node_bitmap(job_resources_t *job_resrcs_ptr, uint32_t job_id)
 
 	i = bit_set_count(job_resrcs_ptr->node_bitmap);
 	if (job_resrcs_ptr->nhosts != i) {
-		error("Invalid change in resource allocation node count for "
-		      "job %u, %u to %d", job_id, job_resrcs_ptr->nhosts, i);
+		error("Invalid change in resource allocation node count for %pJ, %u to %d",
+		      job_ptr, job_resrcs_ptr->nhosts, i);
 		return SLURM_ERROR;
 	}
 	return SLURM_SUCCESS;
@@ -420,49 +422,57 @@ extern void free_job_resources(job_resources_t **job_resrcs_pptr)
 		xfree(job_resrcs_ptr->nodes);
 		xfree(job_resrcs_ptr->sock_core_rep_count);
 		xfree(job_resrcs_ptr->sockets_per_node);
+		xfree(job_resrcs_ptr->tasks_per_node);
 		xfree(job_resrcs_ptr);
 		*job_resrcs_pptr = NULL;
 	}
 }
 
-/* Log the contents of a job_resources data structure using info() */
-extern void log_job_resources(uint32_t job_id,
-			      job_resources_t *job_resrcs_ptr)
+/*
+ * Log the contents of a job_resources data structure using info()
+ *
+ * Function argument is void * to avoid a circular dependency between
+ * job_resources.h and slurmctld.h. Cast inside the function here to
+ * resolve that problem for now.
+ */
+extern void log_job_resources(void *void_job_ptr)
 {
+	struct job_record *job_ptr = (struct job_record *) void_job_ptr;
+	job_resources_t *job_resrcs_ptr = job_ptr->job_resrcs;
 	int bit_inx = 0, bit_reps, i;
 	int array_size, node_inx;
 	int sock_inx = 0, sock_reps = 0;
 
 	if (job_resrcs_ptr == NULL) {
-		error("log_job_resources: job_resrcs_ptr is NULL");
+		error("%s: job_resrcs_ptr is NULL", __func__);
 		return;
 	}
 
 	info("====================");
-	info("job_id:%u nhosts:%u ncpus:%u node_req:%u nodes=%s",
-	     job_id, job_resrcs_ptr->nhosts, job_resrcs_ptr->ncpus,
+	info("%pJ nhosts:%u ncpus:%u node_req:%u nodes=%s",
+	     job_ptr, job_resrcs_ptr->nhosts, job_resrcs_ptr->ncpus,
 	     job_resrcs_ptr->node_req, job_resrcs_ptr->nodes);
 
 	if (job_resrcs_ptr->cpus == NULL) {
-		error("log_job_resources: cpus array is NULL");
+		error("%s: cpus array is NULL", __func__);
 		return;
 	}
 	if (job_resrcs_ptr->memory_allocated == NULL) {
-		error("log_job_resources: memory array is NULL");
+		error("%s: memory array is NULL", __func__);
 		return;
 	}
 	if ((job_resrcs_ptr->cores_per_socket == NULL) ||
 	    (job_resrcs_ptr->sockets_per_node == NULL) ||
 	    (job_resrcs_ptr->sock_core_rep_count == NULL)) {
-		error("log_job_resources: socket/core array is NULL");
+		error("%s: socket/core array is NULL", __func__);
 		return;
 	}
 	if (job_resrcs_ptr->core_bitmap == NULL) {
-		error("log_job_resources: core_bitmap is NULL");
+		error("%s: core_bitmap is NULL", __func__);
 		return;
 	}
 	if (job_resrcs_ptr->core_bitmap_used == NULL) {
-		error("log_job_resources: core_bitmap_used is NULL");
+		error("%s: core_bitmap_used is NULL", __func__);
 		return;
 	}
 	array_size = bit_size(job_resrcs_ptr->core_bitmap);
@@ -500,7 +510,7 @@ extern void log_job_resources(uint32_t job_id,
 			job_resrcs_ptr->cores_per_socket[sock_inx];
 		for (i=0; i<bit_reps; i++) {
 			if (bit_inx >= array_size) {
-				error("log_job_resources: array size wrong");
+				error("%s: array size wrong", __func__);
 				break;
 			}
 			if (bit_test(job_resrcs_ptr->core_bitmap,
@@ -719,8 +729,7 @@ extern int get_job_resources_offset(job_resources_t *job_resrcs_ptr,
 				job_resrcs_ptr->cores_per_socket[i] *
 				job_resrcs_ptr->sock_core_rep_count[i];
 			node_id -= job_resrcs_ptr->sock_core_rep_count[i];
-		} else if (socket_id >= job_resrcs_ptr->
-			   sockets_per_node[i]) {
+		} else if (socket_id >= job_resrcs_ptr->sockets_per_node[i]) {
 			error("get_job_resrcs_bit: socket_id >= socket_cnt "
 			      "(%u >= %u)", socket_id,
 			      job_resrcs_ptr->sockets_per_node[i]);
@@ -1468,6 +1477,16 @@ extern int get_job_resources_cnt(job_resources_t *job_resrcs_ptr,
 	return SLURM_ERROR;
 }
 
+/* Get CPU count for a specific node_id (zero origin), return -1 on error */
+extern int get_job_resources_cpus(job_resources_t *job_resrcs_ptr,
+				  uint32_t node_id)
+{
+	xassert(job_resrcs_ptr->cpus);
+	if (node_id >= job_resrcs_ptr->nhosts)
+		return -1;
+	return (int) job_resrcs_ptr->cpus[node_id];
+}
+
 /*
  * Test if job can fit into the given full-length core_bitmap
  * IN job_resrcs_ptr - resources allocated to a job
@@ -1592,8 +1611,10 @@ extern void remove_job_from_cores(job_resources_t *job_resrcs_ptr,
 	}
 }
 
-/* Given a job pointer and a global node index, return the index of that
- * node in the job_resrcs_ptr->cpus. Return -1 if invalid */
+/*
+ * Given a job pointer and a global node index, return the index of that
+ * node in the job_resrcs_ptr->cpus. Return -1 if invalid
+ */
 extern int job_resources_node_inx_to_cpu_inx(job_resources_t *job_resrcs_ptr,
 					     int node_inx)
 {
@@ -1601,18 +1622,18 @@ extern int job_resources_node_inx_to_cpu_inx(job_resources_t *job_resrcs_ptr,
 
 	/* Test for error cases */
 	if (!job_resrcs_ptr || !job_resrcs_ptr->node_bitmap) {
-		error("job_resources_node_inx_to_cpu_inx: "
-		      "no job_resrcs or node_bitmap");
+		error("%s: no job_resrcs or node_bitmap", __func__);
 		return -1;
 	}
 	if (!bit_test(job_resrcs_ptr->node_bitmap, node_inx)) {
-		error("job_resources_node_inx_to_cpu_inx: "
-		      "Invalid node_inx");
+		char node_str[128];
+		bit_fmt(node_str, sizeof(node_str),job_resrcs_ptr->node_bitmap);
+		error("%s: Invalid node_inx:%d node_bitmap:%s", __func__,
+		      node_inx, node_str);
 		return -1;
 	}
 	if (job_resrcs_ptr->cpu_array_cnt == 0) {
-		error("job_resources_node_inx_to_cpu_inx: "
-		      "Invalid cpu_array_cnt");
+		error("%s: Invalid cpu_array_cnt", __func__);
 		return -1;
 	}
 
@@ -1622,14 +1643,13 @@ extern int job_resources_node_inx_to_cpu_inx(job_resources_t *job_resrcs_ptr,
 
 	/* Scan bitmap, convert node_inx to node_cnt within job's allocation */
 	first_inx = bit_ffs(job_resrcs_ptr->node_bitmap);
-	for (i=first_inx, node_offset=-1; i<=node_inx; i++) {
+	for (i = first_inx, node_offset = -1; i <= node_inx; i++) {
 		if (bit_test(job_resrcs_ptr->node_bitmap, i))
 			node_offset++;
 	}
 
 	if (node_offset >= job_resrcs_ptr->nhosts) {
-		error("job_resources_node_inx_to_cpu_inx: "
-		      "Found %d of %d nodes",
+		error("%s: Found %d of %d nodes", __func__,
 		      job_resrcs_ptr->nhosts, node_offset);
 		return -1;
 	}

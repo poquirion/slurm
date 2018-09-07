@@ -62,6 +62,7 @@
 #include "src/common/xstring.h"
 
 #include "src/slurmd/common/fname.h"
+#include "src/slurmd/common/xcpuinfo.h"
 #include "src/slurmd/slurmd/slurmd.h"
 #include "src/slurmd/slurmstepd/io.h"
 #include "src/slurmd/slurmstepd/multi_prog.h"
@@ -423,19 +424,6 @@ extern stepd_step_rec_t *stepd_step_rec_create(launch_tasks_request_msg_t *msg,
 					     job->job_mem);
 	}
 
-#ifdef HAVE_ALPS_CRAY
-	/*
-	 * This is only used for Cray emulation mode where slurmd is used to
-	 * launch job steps. On a real Cray system, ALPS is used to launch
-	 * the tasks instead of SLURM. Slurm's task launch RPC does NOT
-	 * contain the reservation ID, so just use some non-zero value here
-	 * for testing purposes.
-	 */
-	job->resv_id = 1;
-	select_g_select_jobinfo_set(msg->select_jobinfo, SELECT_JOBDATA_RESV_ID,
-				    &job->resv_id);
-#endif
-
 	/* only need these values on the extern step, don't copy otherwise */
 	if ((msg->job_step_id == SLURM_EXTERN_CONT) && msg->x11) {
 		job->x11 = msg->x11;
@@ -582,11 +570,6 @@ batch_stepd_step_rec_create(batch_job_launch_msg_t *msg)
 	job->task[0]->argc = job->argc;
 	job->task[0]->argv = job->argv;
 
-#ifdef HAVE_ALPS_CRAY
-	select_g_select_jobinfo_get(msg->select_jobinfo, SELECT_JOBDATA_RESV_ID,
-				    &job->resv_id);
-#endif
-
 	return job;
 }
 
@@ -632,6 +615,7 @@ stepd_step_rec_destroy(stepd_step_rec_t *job)
 	xfree(job->tres_bind);
 	xfree(job->tres_freq);
 	xfree(job->user_name);
+	xfree(job->x11_xauthority);
 	xfree(job);
 }
 

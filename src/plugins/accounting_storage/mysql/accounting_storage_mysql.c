@@ -2273,7 +2273,7 @@ extern int remove_common(mysql_conn_t *mysql_conn,
 	xfree(loc_usage_id_char);
 
 	if (debug_flags & DEBUG_FLAG_DB_ASSOC)
-		DB_DEBUG(mysql_conn->conn, "query\n%s %zd",
+		DB_DEBUG(mysql_conn->conn, "query\n%s %zu",
 			 query, strlen(query));
 	rc = mysql_db_query(mysql_conn, query);
 	xfree(query);
@@ -2468,6 +2468,98 @@ extern void mod_tres_str(char **out, char *mod, char *cur,
 		xfree(*out);
 }
 
+static int _get_database_variable(mysql_conn_t *mysql_conn,
+				  const char *variable_name, int *value)
+{
+	MYSQL_ROW row = NULL;
+	MYSQL_RES *result = NULL;
+	char *err_check = NULL;
+	char *query;
+
+	query = xstrdup_printf("show variables like \'%s\';",
+			       variable_name);
+	result = mysql_db_query_ret(mysql_conn, query, 0);
+	if (!result) {
+		error("%s: null result from query `%s`", __func__, query);
+		xfree(query);
+		return SLURM_ERROR;
+	}
+
+	if (mysql_num_rows(result) != 1) {
+		error("%s: invalid results from query `%s`", __func__, query);
+		xfree(query);
+		mysql_free_result(result);
+		return SLURM_ERROR;
+	}
+
+	xfree(query);
+
+	row = mysql_fetch_row(result);
+	*value = (int) strtol(row[1], &err_check, 10);
+
+	if (*err_check) {
+		error("%s: error parsing string to int `%s`", __func__, row[1]);
+		mysql_free_result(result);
+		return SLURM_ERROR;
+	}
+	mysql_free_result(result);
+
+	return SLURM_SUCCESS;
+}
+
+/*
+ * Check the values of innodb global database variables, and print
+ * an error if the values are not at least half the recommendation.
+ */
+static int _check_database_variables(mysql_conn_t *mysql_conn)
+{
+	const char buffer_var[] = "innodb_buffer_pool_size";
+	const int buffer_size = 1073741824;
+	const char logfile_var[] = "innodb_log_file_size";
+	const int logfile_size = 67108864;
+	const char lockwait_var[] = "innodb_lock_wait_timeout";
+	const int lockwait_timeout = 900;
+
+	int value;
+	bool recommended_values = true;
+	char *error_msg = xstrdup("Database settings not recommended values:");
+
+	if (_get_database_variable(mysql_conn, buffer_var, &value))
+		goto error;
+	debug2("%s: %u", buffer_var, value);
+	if (value < (buffer_size / 2)) {
+		recommended_values = false;
+		xstrfmtcat(error_msg, " %s", buffer_var);
+	}
+
+	if (_get_database_variable(mysql_conn, logfile_var, &value))
+		goto error;
+	debug2("%s: %u", logfile_var, value);
+	if (value < (logfile_size / 2)) {
+		recommended_values = false;
+		xstrfmtcat(error_msg, " %s", logfile_var);
+	}
+
+	if (_get_database_variable(mysql_conn, lockwait_var, &value))
+		goto error;
+	debug2("%s: %u", lockwait_var, value);
+	if (value < (lockwait_timeout / 2)) {
+		recommended_values = false;
+		xstrfmtcat(error_msg, " %s", lockwait_var);
+	}
+
+	if (!recommended_values) {
+		error("%s", error_msg);
+	}
+
+	xfree(error_msg);
+	return SLURM_SUCCESS;
+
+error:
+	xfree(error_msg);
+	return SLURM_ERROR;
+}
+
 /*
  * init() is called when the plugin is loaded, before any other functions
  * are called.  Put global initialization here.
@@ -2504,6 +2596,8 @@ extern int init(void)
 		      "the MYSQL plugin.  Trying again in 5 seconds.");
 		sleep(5);
 	}
+
+	_check_database_variables(mysql_conn);
 
 	rc = _as_mysql_acct_check_tables(mysql_conn);
 
@@ -2568,9 +2662,10 @@ extern int fini ( void )
 	return SLURM_SUCCESS;
 }
 
-extern void *acct_storage_p_get_connection(const slurm_trigger_callbacks_t *cb,
-                                           int conn_num, bool rollback,
-                                           char *cluster_name)
+extern void *acct_storage_p_get_connection(
+	const slurm_trigger_callbacks_t *cb,
+	int conn_num, uint16_t *persist_conn_flags,
+	bool rollback, char *cluster_name)
 {
 	mysql_conn_t *mysql_conn = NULL;
 

@@ -47,6 +47,7 @@
 #include "src/common/slurm_time.h"
 #include "src/common/slurmdbd_defs.h"
 
+#define SLURM_17_02_PROTOCOL_VERSION ((31 << 8) | 0) /* slurm version 17.02. */
 #define SLURM_16_05_PROTOCOL_VERSION ((30 << 8) | 0) /* slurm version 16.05. */
 #define SLURM_15_08_PROTOCOL_VERSION ((29 << 8) | 0) /* slurm version 15.08. */
 #define SLURM_14_11_PROTOCOL_VERSION ((28 << 8) | 0) /* slurm version 14.11. */
@@ -3617,9 +3618,9 @@ extern int as_mysql_jobacct_process_archive_load(
 		int data_allocated, data_read = 0;
 		int state_fd = open(arch_rec->archive_file, O_RDONLY);
 		if (state_fd < 0) {
-			info("No archive file (%s) to recover",
+			info("Could not open archive file `%s`: %m",
 			     arch_rec->archive_file);
-			error_code = ENOENT;
+			error_code = errno;
 		} else {
 			data_allocated = BUF_SIZE + 1;
 			data = xmalloc_nz(data_allocated);

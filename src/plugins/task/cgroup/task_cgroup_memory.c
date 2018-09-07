@@ -34,7 +34,7 @@
  *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA.
 \*****************************************************************************/
 
-#define _GNU_SOURCE		/* For POLLRDHUP */
+#define _GNU_SOURCE		/* For POLLRDHUP, O_CLOEXEC on older glibc */
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
@@ -117,10 +117,11 @@ static uint64_t percent_in_bytes (uint64_t mb, float percent)
 	return ((mb * 1024 * 1024) * (percent / 100.0));
 }
 
-extern int task_cgroup_memory_init(slurm_cgroup_conf_t *slurm_cgroup_conf)
+extern int task_cgroup_memory_init(void)
 {
 	xcgroup_t memory_cg;
 	bool set_swappiness;
+	slurm_cgroup_conf_t *slurm_cgroup_conf;
 
 	/* initialize user/job/jobstep cgroup relative paths */
 	user_cgroup_path[0]='\0';
@@ -128,8 +129,7 @@ extern int task_cgroup_memory_init(slurm_cgroup_conf_t *slurm_cgroup_conf)
 	jobstep_cgroup_path[0]='\0';
 
 	/* initialize memory cgroup namespace */
-	if (xcgroup_ns_create(slurm_cgroup_conf, &memory_ns, "", "memory")
-	    != XCGROUP_SUCCESS) {
+	if (xcgroup_ns_create(&memory_ns, "", "memory") != XCGROUP_SUCCESS) {
 		error("task/cgroup: unable to create memory namespace. "
 			"You may need to set the Linux kernel option "
 			"cgroup_enable=memory (and reboot), or disable "
@@ -145,6 +145,10 @@ extern int task_cgroup_memory_init(slurm_cgroup_conf_t *slurm_cgroup_conf)
 		return SLURM_ERROR;
 	}
 	xcgroup_set_param(&memory_cg, "memory.use_hierarchy","1");
+
+	/* read cgroup configuration */
+	slurm_mutex_lock(&xcgroup_config_read_mutex);
+	slurm_cgroup_conf = xcgroup_get_slurm_cgroup_conf();
 
 	set_swappiness = (slurm_cgroup_conf->memory_swappiness != NO_VAL64);
 	if (set_swappiness)
@@ -222,6 +226,7 @@ extern int task_cgroup_memory_init(slurm_cgroup_conf_t *slurm_cgroup_conf)
          *  in /etc/sysconfig/slurm would be the same
          */
         setenv("SLURMSTEPD_OOM_ADJ", "-1000", 0);
+	slurm_mutex_unlock(&xcgroup_config_read_mutex);
 
 	return SLURM_SUCCESS;
 }
@@ -572,7 +577,7 @@ static int _register_oom_notifications(char * cgpath)
 		goto fini;
 	}
 
-	if ((cfd = open(control_file, O_RDONLY)) == -1) {
+	if ((cfd = open(control_file, O_RDONLY | O_CLOEXEC)) == -1) {
 		error("%s: Cannot open %s: %m", __func__, control_file);
 		rc = SLURM_ERROR;
 		goto fini;
@@ -586,13 +591,13 @@ static int _register_oom_notifications(char * cgpath)
 		goto fini;
 	}
 
-	if ((efd = open(event_file, O_WRONLY)) == -1) {
+	if ((efd = open(event_file, O_WRONLY | O_CLOEXEC)) == -1) {
 		error("%s: Cannot open %s: %m", __func__, event_file);
 		rc = SLURM_ERROR;
 		goto fini;
 	}
 
-	if ((event_fd = eventfd(0, 0)) == -1) {
+	if ((event_fd = eventfd(0, EFD_CLOEXEC)) == -1) {
 		error("%s: eventfd: %m", __func__);
 		rc = SLURM_ERROR;
 		goto fini;
@@ -614,7 +619,7 @@ static int _register_oom_notifications(char * cgpath)
 		goto fini;
 	}
 
-	if (pipe(oom_pipe) == -1) {
+	if (pipe2(oom_pipe, O_CLOEXEC) == -1) {
 		error("%s: pipe(): %m", __func__);
 		rc = SLURM_ERROR;
 		goto fini;
@@ -685,7 +690,7 @@ extern int task_cgroup_memory_create(stepd_step_rec_t *job)
 	/* build job cgroup relative path if no set (should not be) */
 	if (*job_cgroup_path == '\0') {
 		if (snprintf(job_cgroup_path,PATH_MAX,"%s/job_%u",
-			      user_cgroup_path,jobid) >= PATH_MAX) {
+			      user_cgroup_path, jobid) >= PATH_MAX) {
 			error("task/cgroup: unable to build job %u memory "
 			      "cg relative path : %m", jobid);
 			return SLURM_ERROR;

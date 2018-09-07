@@ -135,13 +135,16 @@ _handle_stray_socket(const char *socket_name)
 
 static void _handle_stray_script(const char *directory, uint32_t job_id)
 {
-	char dir_path[MAXPATHLEN], file_path[MAXPATHLEN];
+	char *dir_path = NULL, *file_path = NULL;
 
-	snprintf(dir_path, sizeof(dir_path), "%s/job%05u", directory, job_id);
-	snprintf(file_path, sizeof(file_path), "%s/slurm_script", dir_path);
+	xstrfmtcat(dir_path, "%s/job%05u", directory, job_id);
+	xstrfmtcat(file_path, "%s/slurm_script", dir_path);
 	info("%s: Purging vestigial job script %s", __func__, file_path);
 	(void) unlink(file_path);
 	(void) rmdir(dir_path);
+
+	xfree(dir_path);
+	xfree(file_path);
 }
 
 static int
@@ -283,15 +286,6 @@ stepd_connect(const char *directory, const char *nodename,
 		goto rwfail;
 	} else if (rc) {
 		*protocol_version = rc;
-	} else {
-		/* 0n older versions of Slurm < 14.11 SLURM_SUCCESS
-		 * was returned here instead of the protocol version.
-		 * This can be removed when we are 2 versions past
-		 * 14.11.
-		 */
-		slurmstepd_info_t *stepd_info = stepd_get_info(fd);
-		*protocol_version = stepd_info->protocol_version;
-		xfree(stepd_info);
 	}
 
 	free_buf(buffer);
@@ -427,13 +421,13 @@ stepd_signal_container(int fd, uint16_t protocol_version, int signal, int flags,
 		safe_write(fd, &signal, sizeof(int));
 		safe_write(fd, &flags, sizeof(int));
 		safe_write(fd, &req_uid, sizeof(uid_t));
-	} else if (protocol_version >= SLURM_17_11_PROTOCOL_VERSION) {
+	} else if (protocol_version >= SLURM_MIN_PROTOCOL_VERSION) {
 		safe_write(fd, &signal, sizeof(int));
 		safe_write(fd, &flags, sizeof(int));
 	} else {
-		int tmp_signal = (uint32_t)signal | (uint32_t)(flags << 24);
-		safe_write(fd, &tmp_signal, sizeof(int));
-
+		error("%s: invalid protocol_version %u",
+		      __func__, protocol_version);
+		goto rwfail;
 	}
 
 	/* Receive the return code and errno */
@@ -460,14 +454,21 @@ stepd_attach(int fd, uint16_t protocol_version,
 {
 	int req = REQUEST_ATTACH;
 	int rc = SLURM_SUCCESS;
-	int proto = protocol_version;
 
-	safe_write(fd, &req, sizeof(int));
-	safe_write(fd, ioaddr, sizeof(slurm_addr_t));
-	safe_write(fd, respaddr, sizeof(slurm_addr_t));
-	safe_write(fd, job_cred_sig, SLURM_IO_KEY_SIZE);
-	safe_write(fd, &proto, sizeof(int));
-
+	if (protocol_version >= SLURM_18_08_PROTOCOL_VERSION) {
+		safe_write(fd, &req, sizeof(int));
+		safe_write(fd, ioaddr, sizeof(slurm_addr_t));
+		safe_write(fd, respaddr, sizeof(slurm_addr_t));
+		safe_write(fd, job_cred_sig, SLURM_IO_KEY_SIZE);
+		safe_write(fd, &protocol_version, sizeof(uint16_t));
+	} else {
+		int proto = protocol_version;
+		safe_write(fd, &req, sizeof(int));
+		safe_write(fd, ioaddr, sizeof(slurm_addr_t));
+		safe_write(fd, respaddr, sizeof(slurm_addr_t));
+		safe_write(fd, job_cred_sig, SLURM_IO_KEY_SIZE);
+		safe_write(fd, &proto, sizeof(int));
+	}
 	/* Receive the return code */
 	safe_read(fd, &rc, sizeof(int));
 
@@ -749,10 +750,13 @@ rwfail:
 	return SLURM_ERROR;
 }
 
-extern int stepd_get_x11_display(int fd, uint16_t protocol_version)
+extern int stepd_get_x11_display(int fd, uint16_t protocol_version,
+				 char **xauthority)
 {
 	int req = REQUEST_X11_DISPLAY;
-	int display = 0;
+	int display = 0, len = 0;
+
+	*xauthority = NULL;
 
 	safe_write(fd, &req, sizeof(int));
 
@@ -762,10 +766,19 @@ extern int stepd_get_x11_display(int fd, uint16_t protocol_version)
 	 */
 	safe_read(fd, &display, sizeof(int));
 
+	if (protocol_version >= SLURM_18_08_PROTOCOL_VERSION) {
+		safe_read(fd, &len, sizeof(int));
+		if (len) {
+			*xauthority = xmalloc(len);
+			safe_read(fd, *xauthority, len);
+		}
+	}
+
 	debug("Leaving stepd_get_x11_display");
 	return display;
+
 rwfail:
-	return SLURM_ERROR;
+	return 0;
 }
 
 /*

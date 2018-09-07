@@ -430,6 +430,8 @@ PMIX_V1_CPPFLAGS = @PMIX_V1_CPPFLAGS@
 PMIX_V1_LDFLAGS = @PMIX_V1_LDFLAGS@
 PMIX_V2_CPPFLAGS = @PMIX_V2_CPPFLAGS@
 PMIX_V2_LDFLAGS = @PMIX_V2_LDFLAGS@
+PMIX_V3_CPPFLAGS = @PMIX_V3_CPPFLAGS@
+PMIX_V3_LDFLAGS = @PMIX_V3_LDFLAGS@
 PROJECT = @PROJECT@
 PTHREAD_CC = @PTHREAD_CC@
 PTHREAD_CFLAGS = @PTHREAD_CFLAGS@
@@ -552,7 +554,6 @@ EXTRA_DIST = \
 	etc/layouts.d.power_cpufreq.conf.example \
 	etc/layouts.d.unit.conf.example \
 	etc/slurm.conf.example	\
-	etc/slurm.epilog.clean	\
 	etc/slurmctld.service.in \
 	etc/slurmd.service.in	\
 	etc/slurmdbd.conf.example \

@@ -39,6 +39,8 @@
  *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA.
 \*****************************************************************************/
 
+#define _GNU_SOURCE
+
 #include "config.h"
 
 #if HAVE_SYS_PRCTL_H
@@ -52,6 +54,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -80,7 +83,6 @@
 #include "src/common/macros.h"
 #include "src/common/node_select.h"
 #include "src/common/plugstack.h"
-#include "src/common/safeopen.h"
 #include "src/common/slurm_acct_gather_profile.h"
 #include "src/common/slurm_cred.h"
 #include "src/common/slurm_jobacct_gather.h"
@@ -202,10 +204,11 @@ mgr_launch_tasks_setup(launch_tasks_request_msg_t *msg, slurm_addr_t *cli,
 	stepd_step_rec_t *job = NULL;
 
 	if (!(job = stepd_step_rec_create(msg, protocol_version))) {
-		/* We want to send back to the slurmd the reason we
-		   failed so keep track of it since errno could be
-		   reset in _send_launch_failure.
-		*/
+		/*
+		 * We want to send back to the slurmd the reason we
+		 * failed so keep track of it since errno could be
+		 * reset in _send_launch_failure.
+		 */
 		int fail = errno;
 		_send_launch_failure(msg, cli, errno, protocol_version);
 		errno = fail;
@@ -216,6 +219,8 @@ mgr_launch_tasks_setup(launch_tasks_request_msg_t *msg, slurm_addr_t *cli,
 	job->envtp->self = self;
 	job->envtp->select_jobinfo = msg->select_jobinfo;
 	job->accel_bind_type = msg->accel_bind_type;
+	job->tres_bind = xstrdup(msg->tres_bind);
+	job->tres_freq = xstrdup(msg->tres_freq);
 
 	return job;
 }
@@ -231,9 +236,22 @@ _send_srun_resp_msg(slurm_msg_t *resp_msg, uint32_t nnodes)
 	 * it is resumed */
 	wait_for_resumed(resp_msg->msg_type);
 	while (1) {
-		rc = slurm_send_only_node_msg(resp_msg);
-		if ((rc == SLURM_SUCCESS) || (errno != ETIMEDOUT))
-			break;
+		if (resp_msg->protocol_version >= SLURM_18_08_PROTOCOL_VERSION) {
+			int msg_rc = 0;
+			msg_rc = slurm_send_recv_rc_msg_only_one(resp_msg,
+								 &rc, 0);
+			/* Both must be zero for a successful transmission. */
+			if (!msg_rc && !rc)
+				break;
+		} else {
+			/*
+			 * Old unreliable method. See slurm_send_only_node_msg()
+			 * for further details.
+			 */
+			rc = slurm_send_only_node_msg(resp_msg);
+			if (rc == SLURM_SUCCESS)
+				break;
+		}
 
 		if (!max_retry)
 			max_retry = (nnodes / 1024) + 5;
@@ -323,56 +341,6 @@ static uint32_t _get_exit_code(stepd_step_rec_t *job)
 	return step_rc;
 }
 
-#ifdef HAVE_ALPS_CRAY
-/*
- * Kludge to better inter-operate with ALPS layer:
- * - CONFIRM method requires the SID of the shell executing the job script,
- * - RELEASE method is more robustly called from stepdmgr.
- *
- * To avoid calling the same select/cray plugin function also in slurmctld,
- * we use the following convention:
- * - only job_id, job_state, alloc_sid, and select_jobinfo set to non-NULL,
- * - batch_flag is 0 (corresponding call in slurmctld uses batch_flag = 1),
- * - job_state set to the unlikely value of 'NO_VAL'.
- */
-static int _call_select_plugin_from_stepd(stepd_step_rec_t *job,
-					  uint64_t pagg_id,
-					  int (*select_fn)(struct job_record *))
-{
-	struct job_record fake_job_record = {0};
-	int rc;
-
-	fake_job_record.job_id		= job->jobid;
-	fake_job_record.job_state	= NO_VAL;
-	fake_job_record.select_jobinfo	= select_g_select_jobinfo_alloc();
-	select_g_select_jobinfo_set(fake_job_record.select_jobinfo,
-				    SELECT_JOBDATA_RESV_ID, &job->resv_id);
-	if (pagg_id)
-		select_g_select_jobinfo_set(fake_job_record.select_jobinfo,
-					    SELECT_JOBDATA_PAGG_ID, &pagg_id);
-	rc = (*select_fn)(&fake_job_record);
-	select_g_select_jobinfo_free(fake_job_record.select_jobinfo);
-	return rc;
-}
-
-static int _select_cray_plugin_job_ready(stepd_step_rec_t *job)
-{
-	uint64_t pagg_id = proctrack_g_find(job->jmgr_pid);
-
-	if (pagg_id == 0) {
-		error("no PAGG ID: job service disabled on this host?");
-		/*
-		 * If this process is not attached to a container, there is no
-		 * sense in trying to use the SID as fallback, since the call to
-		 * proctrack_g_add() in _fork_all_tasks() will fail later.
-		 * Hence drain the node until sgi_job returns proper PAGG IDs.
-		 */
-		return READY_JOB_FATAL;
-	}
-	return _call_select_plugin_from_stepd(job, pagg_id, select_g_job_ready);
-}
-#endif
-
 /*
  * Send batch exit code to slurmctld. Non-zero rc will DRAIN the node.
  */
@@ -383,10 +351,6 @@ batch_finish(stepd_step_rec_t *job, int rc)
 
 	if (job->argv[0] && (unlink(job->argv[0]) < 0))
 		error("unlink(%s): %m", job->argv[0]);
-
-#ifdef HAVE_ALPS_CRAY
-	_call_select_plugin_from_stepd(job, 0, select_g_job_fini);
-#endif
 
 	if (job->aborted) {
 		if ((job->stepid == NO_VAL) ||
@@ -1018,12 +982,13 @@ static int _spawn_job_container(stepd_step_rec_t *job)
 
 #ifdef WITH_SLURM_X11
 		if (job->x11) {
-			int display;
+			int display, len = 0;
+			char *xauthority;
 
 			close(x11_pipe[0]);
 
 			/* will create several detached threads to process */
-			if (setup_x11_forward(job, &display)) {
+			if (setup_x11_forward(job, &display, &xauthority)) {
 				/* ssh forwarding setup failed */
 				error("x11 port forwarding setup failed");
 				exit(127);
@@ -1035,6 +1000,23 @@ static int _spawn_job_container(stepd_step_rec_t *job)
 				error("%s: failed sending display number back: %m",
 				      __func__);
 			}
+
+			/* send back temporary xauthority file location */
+			if (xauthority)
+				len = strlen(xauthority) + 1;
+
+			if (write(x11_pipe[1], &len, sizeof(int))
+			    != sizeof(int)) {
+				error("%s: failed sending XAUTHORITY back: %m",
+				      __func__);
+			}
+
+			if (write(x11_pipe[1], xauthority, len) != len) {
+				error("%s: failed sending XAUTHORITY back: %m",
+				      __func__);
+			}
+
+			xfree(xauthority);
 			close(x11_pipe[1]);
 
 			/*
@@ -1098,6 +1080,8 @@ static int _spawn_job_container(stepd_step_rec_t *job)
 	 * needs to be marked as having failed as well.
 	 */
 	if (job->x11) {
+		int len;
+
 		close(x11_pipe[1]);
 		if (read(x11_pipe[0], &job->x11_display, sizeof(int))
 		    != sizeof(int)) {
@@ -1105,9 +1089,26 @@ static int _spawn_job_container(stepd_step_rec_t *job)
 			      __func__);
 			job->x11_display = 0;
 		}
+
+		if (read(x11_pipe[0], &len, sizeof(int)) != sizeof(int)) {
+			error("%s: failed retrieving x11 authority value: %m",
+			      __func__);
+		}
+
+		if (len)
+			job->x11_xauthority = xmalloc(len);
+
+		if (read(x11_pipe[0], job->x11_xauthority, len) != len) {
+			error("%s: failed retrieving x11 authority value: %m",
+			      __func__);
+		}
+
 		close(x11_pipe[0]);
 
 		debug("x11 forwarding local display is %d", job->x11_display);
+		if (job->x11_xauthority)
+			debug("x11 forwarding local xauthority is %s",
+			      job->x11_xauthority);
 	}
 #endif
 
@@ -1232,43 +1233,10 @@ job_manager(stepd_step_rec_t *job)
 	if (job->stepid == SLURM_EXTERN_CONT)
 		return _spawn_job_container(job);
 
-	if (!job->batch && job->accel_bind_type) {
+	if (!job->batch && (job->accel_bind_type || job->tres_bind)) {
 		(void) gres_plugin_node_config_load(conf->cpus, conf->node_name,
 						    (void *)&xcpuinfo_abs_to_mac);
 	}
-
-#ifdef HAVE_ALPS_CRAY
-	/*
-	 * Note that the previously called proctrack_g_create function is
-	 * mandatory since the select/cray plugin needs the job container
-	 * ID in order to CONFIRM the ALPS reservation.
-	 * It is not a good idea to perform this setup in _fork_all_tasks(),
-	 * since any transient failure of ALPS (which can happen in practice)
-	 * will then set the frontend node to DRAIN.
-	 *
-	 * ALso note that we do not check the reservation for batch jobs with
-	 * a reservation ID of zero and no CPUs. These are Slurm job
-	 * allocations containing no compute nodes and thus have no ALPS
-	 * reservation.
-	 */
-	if (!job->batch || job->resv_id || job->cpus) {
-		rc = _select_cray_plugin_job_ready(job);
-		if (rc != SLURM_SUCCESS) {
-			/*
-			 * Transient error: slurmctld knows this condition to
-			 * mean that the ALPS (not the Slurm) reservation
-			 * failed and tries again.
-			 */
-			if (rc == READY_JOB_ERROR)
-				rc = ESLURM_RESERVATION_NOT_USABLE;
-			else
-				rc = ESLURMD_SETUP_ENVIRONMENT_ERROR;
-			error("could not confirm ALPS reservation #%u",
-			      job->resv_id);
-			goto fail1;
-		}
-	}
-#endif
 
 	debug2("Before call to spank_init()");
 	if (spank_init (job) < 0) {
@@ -1311,9 +1279,13 @@ job_manager(stepd_step_rec_t *job)
 		goto fail3;
 	}
 
-	if (!job->batch && job->accel_bind_type && (job->node_tasks <= 1))
+	if (!job->batch && (job->node_tasks <= 1) &&
+	    (job->accel_bind_type || job->tres_bind)) {
 		job->accel_bind_type = 0;
-	if (!job->batch && job->accel_bind_type && (job->node_tasks > 1)) {
+		xfree(job->tres_bind);
+	}
+	if (!job->batch && (job->node_tasks > 1) &&
+	    (job->accel_bind_type || job->tres_bind)) {
 		uint64_t gpu_cnt, mic_cnt, nic_cnt;
 		gpu_cnt = gres_plugin_step_count(job->step_gres_list, "gpu");
 		mic_cnt = gres_plugin_step_count(job->step_gres_list, "mic");
@@ -1328,9 +1300,11 @@ job_manager(stepd_step_rec_t *job)
 			job->accel_bind_type = 0;
 	}
 
-	/* Calls pam_setup() and requires pam_finish() if
+	/*
+	 * Calls pam_setup() and requires pam_finish() if
 	 * successful.  Only check for < 0 here since other slurm
-	 * error codes could come that are more descriptive. */
+	 * error codes could come that are more descriptive.
+	 */
 	if ((rc = _fork_all_tasks(job, &io_initialized)) < 0) {
 		debug("_fork_all_tasks failed");
 		rc = ESLURMD_EXECVE_FAILED;
@@ -1674,7 +1648,6 @@ _fork_all_tasks(stepd_step_rec_t *job, bool *io_initialized)
 	jobacct_id_t jobacct_id;
 	char *oom_value;
 	List exec_wait_list = NULL;
-	char *esc;
 	DEF_TIMERS;
 	START_TIMER;
 
@@ -1685,6 +1658,12 @@ _fork_all_tasks(stepd_step_rec_t *job, bool *io_initialized)
 		error("Failed to invoke task plugins: one of task_p_pre_setuid functions returned error");
 		return SLURM_ERROR;
 	}
+
+	/*
+	 * Create hwloc xml file here to avoid threading issues later.
+	 * This has to be done after task_g_pre_setuid().
+	 */
+	xcpuinfo_hwloc_topo_load(NULL, conf->hwloc_xml, false);
 
 	/*
 	 * Temporarily drop effective privileges, except for the euid.
@@ -1735,15 +1714,6 @@ _fork_all_tasks(stepd_step_rec_t *job, bool *io_initialized)
 		error ("_drop_privileges: %m");
 		rc = SLURM_ERROR;
 		goto fail2;
-	}
-
-	/*
-	 * If there is an \ in the path, remove it.
-	 */
-	esc = is_path_escaped(job->cwd);
-	if (esc) {
-		xfree(job->cwd);
-		job->cwd = esc;
 	}
 
 	if (chdir(job->cwd) < 0) {
@@ -2283,53 +2253,69 @@ error:
 	return NULL;
 }
 
-static char *
-_make_batch_script(batch_job_launch_msg_t *msg, char *path)
+static char *_make_batch_script(batch_job_launch_msg_t *msg, char *path)
 {
-	FILE *fp = NULL;
-	char  script[MAXPATHLEN];
+	int flags = O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC;
+	int fd, length;
+	char *script = NULL;
+	char *output;
 
 	if (msg->script == NULL) {
-		error("_make_batch_script: called with NULL script");
+		error("%s: called with NULL script", __func__);
 		return NULL;
 	}
 
-	snprintf(script, sizeof(script), "%s/%s", path, "slurm_script");
-
-again:
-	if ((fp = safeopen(script, "w", SAFEOPEN_CREATE_ONLY)) == NULL) {
-		if ((errno != EEXIST) || (unlink(script) < 0))  {
-			error("couldn't open `%s': %m", script);
-			goto error;
-		}
-		goto again;
+	/* note: should replace this with a length as part of msg */
+	if ((length = strlen(msg->script)) < 1) {
+		error("%s: called with empty script", __func__);
+		return NULL;
 	}
 
-	if (fputs(msg->script, fp) < 0) {
-		(void) fclose(fp);
-		error("fputs: %m");
-		if (errno == ENOSPC)
-			stepd_drain_node("SlurmdSpoolDir is full");
+	xstrfmtcat(script, "%s/%s", path, "slurm_script");
+
+	if ((fd = open(script, flags, S_IRWXU)) < 0) {
+		error("couldn't open `%s': %m", script);
 		goto error;
 	}
 
-	if (fclose(fp) < 0) {
-		error("fclose: %m");
+	if (lseek(fd, length - 1, SEEK_SET) == -1) {
+		error("%s: lseek to %d failed on `%s`: %m",
+		      __func__, length, script);
+		close(fd);
+		goto error;
 	}
+
+	output = mmap(0, length, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0);
+	if (output == MAP_FAILED) {
+		error("%s: mmap failed", __func__);
+		close(fd);
+		goto error;
+	}
+
+	if (write(fd, "", 1) == -1) {
+		error("%s: write failed", __func__);
+		if (errno == ENOSPC)
+			stepd_drain_node("SlurmdSpoolDir is full");
+		close(fd);
+		goto error;
+	}
+
+	(void) close(fd);
+
+	memcpy(output, msg->script, length);
+
+	munmap(output, length);
 
 	if (chown(script, (uid_t) msg->uid, (gid_t) -1) < 0) {
 		error("chown(%s): %m", path);
 		goto error;
 	}
 
-	if (chmod(script, 0500) < 0) {
-		error("chmod: %m");
-	}
-
-	return xstrdup(script);
+	return script;
 
 error:
 	(void) unlink(script);
+	xfree(script);
 	return NULL;
 
 }

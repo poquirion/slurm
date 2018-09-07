@@ -167,7 +167,7 @@ static int _parse_downnodes(void **dest, slurm_parser_enum_t type,
 			    const char *line, char **leftover);
 static void _destroy_downnodes(void *ptr);
 
-static void _load_slurmctld_host(slurm_ctl_conf_t *conf);
+static int _load_slurmctld_host(slurm_ctl_conf_t *conf);
 static int _parse_slurmctld_host(void **dest, slurm_parser_enum_t type,
 				 const char *key, const char *value,
 				 const char *line, char **leftover);
@@ -244,6 +244,7 @@ s_p_options_t slurm_conf_options[] = {
 	{"GresTypes", S_P_STRING},
 	{"GroupUpdateForce", S_P_UINT16},
 	{"GroupUpdateTime", S_P_UINT16},
+	{"GpuFreqDef", S_P_STRING},
 	{"HealthCheckInterval", S_P_UINT16},
 	{"HealthCheckNodeState", S_P_STRING},
 	{"HealthCheckProgram", S_P_STRING},
@@ -479,7 +480,7 @@ static void _set_node_prefix(const char *nodenames)
 	if (nodenames[i] == '\0')
 		conf_ptr->node_prefix = xstrdup(nodenames);
 	else {
-		tmp = xmalloc(sizeof(char)*i+1);
+		tmp = xmalloc(i + 1);
 		snprintf(tmp, i, "%s", nodenames);
 		conf_ptr->node_prefix = tmp;
 		tmp = NULL;
@@ -1696,22 +1697,132 @@ static void _destroy_partitionname(void *ptr)
 	xfree(ptr);
 }
 
-static void _load_slurmctld_host(slurm_ctl_conf_t *conf)
+static int _load_slurmctld_host(slurm_ctl_conf_t *conf)
 {
-	int count = 0, i, rc;
+	int count = 0, i, j;
+	char *ignore;
 	slurm_conf_server_t **ptr = NULL;
 
-	rc = s_p_get_array((void ***)&ptr, &count, "SlurmctldHost",
-			   conf_hashtbl);
-	conf->control_machine = xmalloc(sizeof(char *) * (count + 2));
-	conf->control_addr    = xmalloc(sizeof(char *) * (count + 2));
-	if (rc == 0)
-		return;
+	if (s_p_get_array((void ***)&ptr, &count, "SlurmctldHost", conf_hashtbl)) {
+		/*
+		 * Using new-style SlurmctldHost entries.
+		 */
+		conf->control_machine = xmalloc(sizeof(char *) * count);
+		conf->control_addr = xmalloc(sizeof(char *) * count);
+		conf->control_cnt = count;
 
-	for (i = 0; i < count; i++) {
-		conf->control_machine[i] = xstrdup(ptr[i]->hostname);
-		conf->control_addr[i] = xstrdup(ptr[i]->addr);
+		for (i = 0; i < count; i++) {
+			conf->control_machine[i] = xstrdup(ptr[i]->hostname);
+			conf->control_addr[i] = xstrdup(ptr[i]->addr);
+		}
+
+		/*
+		 * Throw errors if old-style entries are still in the config,
+		 * but continue on with the newer-style entries anyways.
+		 */
+		if (s_p_get_string(&ignore, "ControlMachine", conf_hashtbl)) {
+			error("Ignoring ControlMachine since SlurmctldHost is set.");
+			xfree(ignore);
+		}
+		if (s_p_get_string(&ignore, "ControlAddr", conf_hashtbl)) {
+			error("Ignoring ControlAddr since SlurmctldHost is set.");
+			xfree(ignore);
+		}
+		if (s_p_get_string(&ignore, "BackupController", conf_hashtbl)) {
+			error("Ignoring BackupController since SlurmctldHost is set.");
+			xfree(ignore);
+		}
+		if (s_p_get_string(&ignore, "BackupAddr", conf_hashtbl)) {
+			error("Ignoring BackupAddr since SlurmctldHost is set.");
+			xfree(ignore);
+		}
+	} else {
+		/*
+		 * Using old-style ControlMachine/BackupController entries.
+		 *
+		 * Allocate two entries, one for primary and one for backup.
+		 */
+		char *tmp = NULL;
+		conf->control_machine = xmalloc(sizeof(char *));
+		conf->control_addr = xmalloc(sizeof(char *));
+		conf->control_cnt = 1;
+
+		if (!s_p_get_string(&conf->control_machine[0],
+				    "ControlMachine", conf_hashtbl)) {
+			/*
+			 * Missing SlurmctldHost and ControlMachine, so just
+			 * warn about the newer config option.
+			 */
+			error("No SlurmctldHost defined.");
+			goto error;
+		}
+		if (!s_p_get_string(&conf->control_addr[0],
+				    "ControlAddr", conf_hashtbl) &&
+		    conf->control_machine[0] &&
+		    strchr(conf->control_machine[0], ',')) {
+			error("ControlMachine has multiple host names, so ControlAddr must be specified.");
+			goto error;
+		}
+
+		if (s_p_get_string(&tmp, "BackupController", conf_hashtbl)) {
+			xrealloc(conf->control_machine, (sizeof(char *) * 2));
+			xrealloc(conf->control_addr, (sizeof(char *) * 2));
+			conf->control_cnt = 2;
+			conf->control_machine[1] = tmp;
+			tmp = NULL;
+		}
+		if (s_p_get_string(&tmp, "BackupAddr", conf_hashtbl)) {
+			if (conf->control_cnt == 1) {
+				error("BackupAddr specified without BackupController");
+				xfree(tmp);
+				goto error;
+			}
+			conf->control_addr[1] = tmp;
+			tmp = NULL;
+		}
 	}
+
+	/*
+	 * Fix up the control_addr array if they were not explicitly set above,
+	 * replace "localhost" with the actual hostname, and verify there are
+	 * no duplicate entries.
+	 */
+	for (i = 0; i < conf->control_cnt; i++) {
+		if (!conf->control_addr[i]) {
+			conf->control_addr[i] =
+				xstrdup(conf->control_machine[i]);
+		}
+		if (!xstrcasecmp("localhost", conf->control_machine[i])) {
+			xfree(conf->control_machine[i]);
+			conf->control_machine[i] = xmalloc(MAX_SLURM_NAME);
+			if (gethostname_short(conf->control_machine[i],
+					      MAX_SLURM_NAME)) {
+				error("getnodename: %m");
+				goto error;
+			}
+		}
+		for (j = 0; j < i; j++) {
+			if (!xstrcmp(conf->control_machine[i],
+				     conf->control_machine[j])) {
+				error("Duplicate SlurmctldHost records: %s",
+				      conf->control_machine[i]);
+				goto error;
+			}
+		}
+	}
+	return SLURM_SUCCESS;
+
+error:
+	if (conf->control_machine && conf->control_addr) {
+		for (i = 0; i < conf->control_cnt; i++) {
+			xfree(conf->control_machine[i]);
+			xfree(conf->control_addr[i]);
+		}
+		xfree(conf->control_machine);
+		xfree(conf->control_addr);
+	}
+	conf->control_cnt = 0;
+	return SLURM_ERROR;
 }
 
 static int _parse_slurmctld_host(void **dest, slurm_parser_enum_t type,
@@ -2719,6 +2830,7 @@ free_slurm_conf (slurm_ctl_conf_t *ctl_conf_ptr, bool purge_node_hash)
 	xfree (ctl_conf_ptr->ext_sensors_type);
 	xfree (ctl_conf_ptr->fed_params);
 	xfree (ctl_conf_ptr->gres_plugins);
+	xfree (ctl_conf_ptr->gpu_freq_def);
 	xfree (ctl_conf_ptr->health_check_program);
 	xfree (ctl_conf_ptr->job_acct_gather_freq);
 	xfree (ctl_conf_ptr->job_acct_gather_type);
@@ -3053,7 +3165,7 @@ static int _config_is_storage(s_p_hashtbl_t *hashtbl, char *name)
 	/* unlock conf_lock and set as initialized before accessing it */
 	conf_initialized = true;
 	slurm_mutex_unlock(&conf_lock);
-	db_conn = acct_storage_g_get_connection(NULL, 0, false, NULL);
+	db_conn = acct_storage_g_get_connection(NULL, 0, NULL, false, NULL);
 	if (db_conn == NULL)
 		goto end; /* plugin will out error itself */
 	config = acct_storage_g_get_config(db_conn, "slurm.conf");
@@ -3376,7 +3488,7 @@ _validate_and_set_defaults(slurm_ctl_conf_t *conf, s_p_hashtbl_t *hashtbl)
 	uint16_t uint16_tmp;
 	uint64_t def_cpu_per_gpu = 0, def_mem_per_gpu = 0, tot_prio_weight;
 	job_defaults_t *job_defaults;
-	int i, j;
+	int i;
 
 	if (!s_p_get_uint16(&conf->batch_start_timeout, "BatchStartTimeout",
 			    hashtbl))
@@ -3400,47 +3512,8 @@ _validate_and_set_defaults(slurm_ctl_conf_t *conf, s_p_hashtbl_t *hashtbl)
 	if (!s_p_get_uint16(&conf->complete_wait, "CompleteWait", hashtbl))
 		conf->complete_wait = DEFAULT_COMPLETE_WAIT;
 
-	_load_slurmctld_host(conf);
-	(void) s_p_get_string(&conf->control_machine[0], "ControlMachine",
-			      hashtbl);
-	if (!s_p_get_string(&conf->control_addr[0], "ControlAddr", hashtbl) &&
-	    conf->control_machine[0] &&
-	    strchr(conf->control_machine[0], ',')) {
-		error("ControlMachine has multiple host names so ControlAddr must be specified");
+	if (_load_slurmctld_host(conf))
 		return SLURM_ERROR;
-	}
-	(void) s_p_get_string(&conf->control_machine[1], "BackupController",
-			      hashtbl);
-	if (s_p_get_string(&conf->control_addr[1], "BackupAddr", hashtbl)) {
-		if (!conf->control_machine[1]) {
-			error("BackupAddr specified without BackupController");
-			xfree(conf->control_addr[1]);
-		}
-	}
-	for (i = 0; conf->control_machine[i]; i++) {
-		if (!conf->control_addr[i]) {
-			conf->control_addr[i] =
-				xstrdup(conf->control_machine[i]);
-		}
-		if (!xstrcasecmp("localhost", conf->control_machine[i])) {
-			xfree(conf->control_machine[i]);
-			conf->control_machine[i] = xmalloc(MAX_SLURM_NAME);
-			if (gethostname_short(conf->control_machine[i],
-					      MAX_SLURM_NAME)) {
-				error("getnodename: %m");
-				return SLURM_ERROR;
-			}
-		}
-		for (j = 0; j < i; j++) {
-			if (!xstrcmp(conf->control_machine[i],
-				     conf->control_machine[j])) {
-				error("Duplicate SlurmctldHost records: %s",
-				      conf->control_machine[i]);
-				return SLURM_ERROR;
-			}
-		}
-	}
-	conf->control_cnt = i;
 
 	if (!s_p_get_string(&conf->acct_gather_energy_type,
 			    "AcctGatherEnergyType", hashtbl))
@@ -3529,12 +3602,14 @@ _validate_and_set_defaults(slurm_ctl_conf_t *conf, s_p_hashtbl_t *hashtbl)
 		if (cpu_freq_verify_govlist(temp_str, &conf->cpu_freq_govs)) {
 			error("Ignoring invalid CpuFreqGovernors: %s",
 				temp_str);
-			conf->cpu_freq_govs = CPU_FREQ_ONDEMAND |
-					      CPU_FREQ_PERFORMANCE;
+			conf->cpu_freq_govs = CPU_FREQ_ONDEMAND    |
+					      CPU_FREQ_PERFORMANCE |
+					      CPU_FREQ_USERSPACE;
 		}
 		xfree(temp_str);
 	} else {
-		conf->cpu_freq_govs = CPU_FREQ_ONDEMAND | CPU_FREQ_PERFORMANCE;
+		conf->cpu_freq_govs = CPU_FREQ_ONDEMAND | CPU_FREQ_PERFORMANCE |
+				      CPU_FREQ_USERSPACE;
 	}
 
 	if (!s_p_get_string(&conf->crypto_type, "CryptoType", hashtbl))
@@ -3641,6 +3716,9 @@ _validate_and_set_defaults(slurm_ctl_conf_t *conf, s_p_hashtbl_t *hashtbl)
 
 	if (!s_p_get_uint16(&conf->group_time, "GroupUpdateTime", hashtbl))
 		conf->group_time = DEFAULT_GROUP_TIME;
+
+	if (!s_p_get_string(&conf->gpu_freq_def, "GpuFreqDef", hashtbl))
+		conf->gpu_freq_def = xstrdup("high,memory=high,voltage=high");
 
 	if (!s_p_get_uint16(&conf->inactive_limit, "InactiveLimit", hashtbl))
 		conf->inactive_limit = DEFAULT_INACTIVE_LIMIT;
@@ -4334,14 +4412,13 @@ _validate_and_set_defaults(slurm_ctl_conf_t *conf, s_p_hashtbl_t *hashtbl)
 		if (conf->prolog_flags == NO_VAL16) {
 			fatal("PrologFlags invalid: %s", temp_str);
 		}
+
+		if ((conf->prolog_flags & PROLOG_FLAG_NOHOLD) &&
+		    (conf->prolog_flags & PROLOG_FLAG_CONTAIN)) {
+			fatal("PrologFlags invalid combination: NoHold cannot be combined with Contain and/or X11");
+		}
 		if (conf->prolog_flags & PROLOG_FLAG_NOHOLD) {
 			conf->prolog_flags |= PROLOG_FLAG_ALLOC;
-#ifdef HAVE_ALPS_CRAY
-			error("PrologFlags=NoHold is not compatible when "
-			      "running on ALPS/Cray systems");
-			conf->prolog_flags &= (~PROLOG_FLAG_NOHOLD);
-			return SLURM_ERROR;
-#endif
 		}
 		xfree(temp_str);
 	} else { /* Default: no Prolog Flags are set */
@@ -4389,12 +4466,6 @@ _validate_and_set_defaults(slurm_ctl_conf_t *conf, s_p_hashtbl_t *hashtbl)
 
 	if (!s_p_get_uint16(&conf->ret2service, "ReturnToService", hashtbl))
 		conf->ret2service = DEFAULT_RETURN_TO_SERVICE;
-#ifdef HAVE_ALPS_CRAY
-	if (conf->ret2service > 1) {
-		error("ReturnToService > 1 is not supported on ALPS Cray");
-		return SLURM_ERROR;
-	}
-#endif
 
 	(void) s_p_get_string(&conf->resv_epilog, "ResvEpilog", hashtbl);
 	(void) s_p_get_uint16(&conf->resv_over_run, "ResvOverRun", hashtbl);
@@ -4472,11 +4543,7 @@ _validate_and_set_defaults(slurm_ctl_conf_t *conf, s_p_hashtbl_t *hashtbl)
 	}
 #ifdef HAVE_REAL_CRAY
 	/*
-	 * This requirement derives from Cray ALPS:
-	 * - ALPS reservations can only be created by the job owner or root
-	 *   (confirmation may be done by other non-privileged users);
-	 * - freeing a reservation always requires root privileges.
-	 * Even when running on Native Cray the SlurmUser must be root
+	 * When running on Native Cray the SlurmUser must be root
 	 * to access the needed libraries.
 	 */
 	if (conf->slurm_user_id != 0) {
@@ -4534,7 +4601,7 @@ _validate_and_set_defaults(slurm_ctl_conf_t *conf, s_p_hashtbl_t *hashtbl)
 		xfree(temp_str);
 		_normalize_debug_level(&conf->slurmctld_syslog_debug);
 	} else
-		conf->slurmctld_syslog_debug = LOG_LEVEL_QUIET;
+		conf->slurmctld_syslog_debug = LOG_LEVEL_END;
 
 	if (s_p_get_string(&temp_str, "SlurmctldPort", hashtbl)) {
 		char *end_ptr = NULL;
@@ -4638,7 +4705,7 @@ _validate_and_set_defaults(slurm_ctl_conf_t *conf, s_p_hashtbl_t *hashtbl)
 		xfree(temp_str);
 		_normalize_debug_level(&conf->slurmd_syslog_debug);
 	} else
-		conf->slurmd_syslog_debug = LOG_LEVEL_QUIET;
+		conf->slurmd_syslog_debug = LOG_LEVEL_END;
 
 	if (!s_p_get_uint16(&conf->slurmd_timeout, "SlurmdTimeout", hashtbl))
 		conf->slurmd_timeout = DEFAULT_SLURMD_TIMEOUT;

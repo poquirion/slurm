@@ -243,6 +243,7 @@ slurm_sprint_job_step_info ( job_step_info_t * job_step_ptr,
 		"ResvPorts=%s Checkpoint=%u CheckpointDir=%s",
 		 job_step_ptr->resv_ports,
 		 job_step_ptr->ckpt_interval, job_step_ptr->ckpt_dir);
+	xstrcat(out, line_end);
 	xstrcat(out, tmp_line);
 
 	/****** Line 6 ******/
@@ -599,7 +600,8 @@ extern int slurm_job_step_stat(uint32_t job_id, uint32_t step_id,
 			return rc;
 		}
 		node_list = step_layout->node_list;
-		use_protocol_ver = step_layout->start_protocol_ver;
+		use_protocol_ver = MIN(SLURM_PROTOCOL_VERSION,
+				       step_layout->start_protocol_ver);
 	}
 
  	if (!*resp) {

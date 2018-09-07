@@ -66,7 +66,6 @@
 #define MAX_RETRIES 15
 
 static void  _add_bb_to_script(char **script_body, char *burst_buffer_file);
-static int   _check_cluster_specific_settings(job_desc_msg_t *desc);
 static void  _env_merge_filter(job_desc_msg_t *desc);
 static int   _fill_job_desc_from_opts(job_desc_msg_t *desc);
 static void *_get_script_buffer(const char *filename, int *size);
@@ -202,6 +201,10 @@ int main(int argc, char **argv)
 			list_append(job_req_list, desc);
 		}
 	}
+	if (!desc) {	/* For CLANG false positive */
+		error("Internal parsing error");
+		exit(1);
+	}
 
 	if (job_env_list) {
 		ListIterator desc_iter, env_iter;
@@ -220,9 +223,15 @@ int main(int argc, char **argv)
 		set_envs(&desc->environment, &pack_env, -1);
 		desc->env_size = envcount(desc->environment);
 	}
+	if (!desc) {	/* For CLANG false positive */
+		error("Internal parsing error");
+		exit(1);
+	}
 
-	/* If can run on multiple clusters find the earliest run time
-	 * and run it there */
+	/*
+	 * If can run on multiple clusters find the earliest run time
+	 * and run it there
+	 */
 	if (opt.clusters) {
 		if (job_req_list) {
 			rc = slurmdb_get_first_pack_cluster(job_req_list,
@@ -236,13 +245,6 @@ int main(int argc, char **argv)
 			exit(error_exit);
 		}
 	}
-
-	if (job_req_list && is_alps_cray_system()) {
-		info("Heterogeneous jobs not supported on Cray/ALPS systems");
-		exit(1);
-	}
-	if (_check_cluster_specific_settings(desc) != SLURM_SUCCESS)
-		exit(error_exit);
 
 	if (sbopt.test_only) {
 		if (job_req_list)
@@ -498,34 +500,6 @@ static void _env_merge_filter(job_desc_msg_t *desc)
 	}
 }
 
-/* Returns SLURM_ERROR if settings are invalid for chosen cluster */
-static int _check_cluster_specific_settings(job_desc_msg_t *req)
-{
-	int rc = SLURM_SUCCESS;
-
-	if (is_alps_cray_system()) {
-		/*
-		 * Fix options and inform user, but do not abort submission.
-		 */
-		if (req->shared && (req->shared != NO_VAL16)) {
-			info("--share is not supported on Cray/ALPS systems.");
-			req->shared = NO_VAL16;
-		}
-		if (req->overcommit && (req->overcommit != NO_VAL8)) {
-			info("--overcommit is not supported on Cray/ALPS "
-			     "systems.");
-			req->overcommit = false;
-		}
-		if (req->wait_all_nodes &&
-		    (req->wait_all_nodes != NO_VAL16)) {
-			info("--wait-all-nodes is handled automatically on "
-			     "Cray/ALPS systems.");
-			req->wait_all_nodes = NO_VAL16;
-		}
-	}
-	return rc;
-}
-
 /* Returns 0 on success, -1 on failure */
 static int _fill_job_desc_from_opts(job_desc_msg_t *desc)
 {
@@ -749,7 +723,7 @@ static int _fill_job_desc_from_opts(job_desc_msg_t *desc)
 		xfree(opt.tres_bind);
 	}
 	desc->tres_bind = xstrdup(opt.tres_bind);
-	xfmt_tres(&opt.tres_freq, "gpu", opt.gpu_freq);
+	xfmt_tres_freq(&opt.tres_freq, "gpu", opt.gpu_freq);
 	if (tres_freq_verify_cmdline(opt.tres_freq)) {
 		error("Invalid --tres-freq argument: %s. Ignored",
 		      opt.tres_freq);

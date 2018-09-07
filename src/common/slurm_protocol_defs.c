@@ -235,8 +235,14 @@ extern int slurm_char_list_copy(List dst, List src)
 	return SLURM_SUCCESS;
 }
 
-/* returns number of objects added to list */
 extern int slurm_addto_char_list(List char_list, char *names)
+{
+	return slurm_addto_char_list_with_case(char_list, names, true);
+}
+
+/* returns number of objects added to list */
+extern int slurm_addto_char_list_with_case(List char_list, char *names,
+					   bool lower_case_normalization)
 {
 	int i = 0, start = 0, cnt = 0;
 	char *name = NULL;
@@ -299,8 +305,8 @@ extern int slurm_addto_char_list(List char_list, char *names)
 						list_delete_item(itr);
 					} else
 						count++;
-
-					xstrtolower(name);
+					if (lower_case_normalization)
+						xstrtolower(name);
 					list_append(char_list, name);
 
 					list_iterator_reset(itr);
@@ -351,8 +357,8 @@ extern int slurm_addto_char_list(List char_list, char *names)
 							list_delete_item(itr);
 						} else
 							count++;
-
-						xstrtolower(this_node_name);
+						if (lower_case_normalization)
+							xstrtolower(this_node_name);
 						list_append(char_list,
 							    this_node_name);
 
@@ -379,8 +385,8 @@ extern int slurm_addto_char_list(List char_list, char *names)
 				list_delete_item(itr);
 			} else
 				count++;
-
-			xstrtolower(name);
+			if (lower_case_normalization)
+				xstrtolower(name);
 			list_append(char_list, name);
 		}
 	}
@@ -666,11 +672,22 @@ extern void slurm_free_last_update_msg(last_update_msg_t * msg)
 	xfree(msg);
 }
 
+extern void slurm_init_reboot_msg(reboot_msg_t *msg, bool clear)
+{
+	xassert(msg);
+
+	if (clear)
+		memset(msg, 0, sizeof(reboot_msg_t));
+
+	msg->next_state = NO_VAL;
+}
+
 extern void slurm_free_reboot_msg(reboot_msg_t * msg)
 {
 	if (msg) {
 		xfree(msg->features);
 		xfree(msg->node_list);
+		xfree(msg->reason);
 		xfree(msg);
 	}
 }
@@ -839,6 +856,7 @@ extern void slurm_free_job_desc_msg(job_desc_msg_t *msg)
 		xfree(msg->reservation);
 		xfree(msg->resp_host);
 		xfree(msg->script);
+		free_buf(msg->script_buf);
 		select_g_select_jobinfo_free(msg->select_jobinfo);
 		msg->select_jobinfo = NULL;
 		xfree(msg->std_err);
@@ -946,6 +964,7 @@ extern void slurm_free_job_launch_msg(batch_job_launch_msg_t * msg)
 		xfree(msg->restart_dir);
 		xfree(msg->resv_name);
 		xfree(msg->script);
+		free_buf(msg->script_buf);
 		select_g_select_jobinfo_free(msg->select_jobinfo);
 		if (msg->spank_job_env) {
 			for (i = 0; i < msg->spank_job_env_size; i++)
@@ -1522,6 +1541,7 @@ extern void slurm_free_suspend_int_msg(suspend_int_msg_t *msg)
 
 extern void slurm_free_stats_response_msg(stats_info_response_msg_t *msg)
 {
+	int i;
 	if (msg) {
 		xfree(msg->rpc_type_id);
 		xfree(msg->rpc_type_cnt);
@@ -1529,6 +1549,13 @@ extern void slurm_free_stats_response_msg(stats_info_response_msg_t *msg)
 		xfree(msg->rpc_user_id);
 		xfree(msg->rpc_user_cnt);
 		xfree(msg->rpc_user_time);
+		xfree(msg->rpc_queue_type_id);
+		xfree(msg->rpc_queue_count);
+		xfree(msg->rpc_dump_types);
+		for (i = 0; i < msg->rpc_dump_count; i++) {
+			xfree(msg->rpc_dump_hostlist[i]);
+		}
+		xfree(msg->rpc_dump_hostlist);
 		xfree(msg);
 	}
 }
@@ -2849,10 +2876,26 @@ extern char *node_state_string(uint32_t inx)
 		if (comp_flag
 		    || (base == NODE_STATE_ALLOCATED)
 		    || (base == NODE_STATE_MIXED)) {
+			if (maint_flag)
+				return "DRAINING$";
+			if (reboot_flag)
+				return "DRAINING@";
+			if (power_up_flag)
+				return "DRAINING#";
+			if (power_down_flag)
+				return "DRAINING~";
 			if (no_resp_flag)
 				return "DRAINING*";
 			return "DRAINING";
 		} else {
+			if (maint_flag)
+				return "DRAINED$";
+			if (reboot_flag)
+				return "DRAINED@";
+			if (power_up_flag)
+				return "DRAINED#";
+			if (power_down_flag)
+				return "DRAINED~";
 			if (no_resp_flag)
 				return "DRAINED*";
 			return "DRAINED";
@@ -2870,6 +2913,8 @@ extern char *node_state_string(uint32_t inx)
 		}
 	}
 
+	if (inx == NODE_STATE_CANCEL_REBOOT)
+		return "CANCEL_REBOOT";
 	if (inx == NODE_STATE_POWER_SAVE)
 		return "POWER_DOWN";
 	if (inx == NODE_STATE_POWER_UP)
@@ -3007,10 +3052,26 @@ extern char *node_state_string_compact(uint32_t inx)
 		if (comp_flag
 		    || (inx == NODE_STATE_ALLOCATED)
 		    || (inx == NODE_STATE_MIXED)) {
+			if (maint_flag)
+				return "DRNG$";
+			if (reboot_flag)
+				return "DRNG@";
+			if (power_up_flag)
+				return "DRNG#";
+			if (power_down_flag)
+				return "DRNG~";
 			if (no_resp_flag)
 				return "DRNG*";
 			return "DRNG";
 		} else {
+			if (maint_flag)
+				return "DRAIN$";
+			if (reboot_flag)
+				return "DRAIN@";
+			if (power_up_flag)
+				return "DRAIN#";
+			if (power_down_flag)
+				return "DRAIN~";
 			if (no_resp_flag)
 				return "DRAIN*";
 			return "DRAIN";
@@ -3028,6 +3089,8 @@ extern char *node_state_string_compact(uint32_t inx)
 		}
 	}
 
+	if (inx == NODE_STATE_CANCEL_REBOOT)
+		return "CANC_R";
 	if (inx == NODE_STATE_POWER_SAVE)
 		return "POW_DN";
 	if (inx == NODE_STATE_POWER_UP)
@@ -3584,6 +3647,16 @@ extern void slurm_free_front_end_info_members(front_end_info_t * front_end)
 		xfree(front_end->reason);
 		xfree(front_end->version);
 	}
+}
+
+extern void slurm_init_node_info_t(node_info_t *msg, bool clear)
+{
+	xassert(msg);
+
+	if (clear)
+		memset(msg, 0, sizeof(node_info_t));
+
+	msg->next_state = NO_VAL;
 }
 
 /*

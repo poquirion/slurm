@@ -39,11 +39,17 @@
  *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA.
 \****************************************************************************/
 
+#define _GNU_SOURCE
+
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <time.h>
 
 #include "slurm/slurm_errno.h"
@@ -65,12 +71,15 @@
  * for details.
  */
 strong_alias(create_buf,	slurm_create_buf);
+strong_alias(create_mmap_buf,	slurm_create_mmap_buf);
 strong_alias(free_buf,		slurm_free_buf);
 strong_alias(grow_buf,		slurm_grow_buf);
 strong_alias(init_buf,		slurm_init_buf);
 strong_alias(xfer_buf_data,	slurm_xfer_buf_data);
 strong_alias(pack_time,		slurm_pack_time);
 strong_alias(unpack_time,	slurm_unpack_time);
+strong_alias(packfloat, 	slurm_packfloat);
+strong_alias(unpackfloat,	slurm_unpackfloat);
 strong_alias(packdouble,	slurm_packdouble);
 strong_alias(unpackdouble,	slurm_unpackdouble);
 strong_alias(packlongdouble,	slurm_packlongdouble);
@@ -83,6 +92,8 @@ strong_alias(pack16,		slurm_pack16);
 strong_alias(unpack16,		slurm_unpack16);
 strong_alias(pack8,		slurm_pack8);
 strong_alias(unpack8,		slurm_unpack8);
+strong_alias(packbool,		slurm_packbool);
+strong_alias(unpackbool,	slurm_unpackbool);
 strong_alias(pack16_array,      slurm_pack16_array);
 strong_alias(unpack16_array,    slurm_unpack16_array);
 strong_alias(pack32_array,	slurm_pack32_array);
@@ -117,9 +128,52 @@ Buf create_buf(char *data, uint32_t size)
 	my_buf->size = size;
 	my_buf->processed = 0;
 	my_buf->head = data;
+	my_buf->mmaped = false;
 
 	return my_buf;
 }
+
+/*
+ * create_mmap_buf - create an mmap()'d read-only buffer from
+ * the supplied file.
+ */
+Buf create_mmap_buf(char *file)
+{
+	Buf my_buf;
+	int fd;
+	struct stat f_stat;
+	void *data;
+
+	if ((fd = open(file, O_RDONLY | O_CLOEXEC)) < 0) {
+		debug("%s: Failed to open file `%s`, %m", __func__, file);
+		return NULL;
+	}
+
+	if (fstat(fd, &f_stat)) {
+		debug("%s: Failed to fstat file `%s`, %m", __func__, file);
+		close(fd);
+		return NULL;
+	}
+
+	data = mmap(NULL, f_stat.st_size, PROT_READ, MAP_SHARED, fd, 0);
+	close(fd);
+	if (data == MAP_FAILED) {
+		debug("%s: Failed to mmap file `%s`, %m", __func__, file);
+		return NULL;
+	}
+
+	my_buf = xmalloc_nz(sizeof(struct slurm_buf));
+	my_buf->magic = BUF_MAGIC;
+	my_buf->size = f_stat.st_size;
+	my_buf->processed = 0;
+	my_buf->head = data;
+	my_buf->mmaped = true;
+
+	debug3("%s: loaded file `%s` as Buf", __func__, file);
+
+	return my_buf;
+}
+
 
 /* free_buf - release memory associated with a given buffer */
 void free_buf(Buf my_buf)
@@ -127,13 +181,19 @@ void free_buf(Buf my_buf)
 	if (!my_buf)
 		return;
 	assert(my_buf->magic == BUF_MAGIC);
-	xfree(my_buf->head);
+	if (my_buf->mmaped)
+		munmap(my_buf->head, my_buf->size);
+	else
+		xfree(my_buf->head);
+
 	xfree(my_buf);
 }
 
 /* Grow a buffer by the specified amount */
 void grow_buf (Buf buffer, uint32_t size)
 {
+	if (buffer->mmaped)
+		fatal_abort("attempt to grow mmap()'d buffer not supported");
 	if ((buffer->size + size) > MAX_BUF_SIZE) {
 		error("%s: Buffer size limit exceeded (%u > %u)",
 		      __func__, (buffer->size + size), MAX_BUF_SIZE);
@@ -160,7 +220,8 @@ Buf init_buf(uint32_t size)
 	my_buf->magic = BUF_MAGIC;
 	my_buf->size = size;
 	my_buf->processed = 0;
-	my_buf->head = xmalloc(sizeof(char)*size);
+	my_buf->head = xmalloc(size);
+	my_buf->mmaped = false;
 	return my_buf;
 }
 
@@ -171,6 +232,10 @@ void *xfer_buf_data(Buf my_buf)
 	void *data_ptr;
 
 	assert(my_buf->magic == BUF_MAGIC);
+
+	if (my_buf->mmaped)
+		fatal_abort("attempt to grow mmap()'d buffer not supported");
+
 	data_ptr = (void *) my_buf->head;
 	xfree(my_buf);
 	return data_ptr;
@@ -246,6 +311,51 @@ void 	packdouble(double val, Buf buffer)
 
 	memcpy(&buffer->head[buffer->processed], &nl, sizeof(nl));
 	buffer->processed += sizeof(nl);
+}
+
+/*
+ * Given a buffer containing a network byte order 32-bit integer,
+ * typecast as float, and  divide by FLOAT_MULT
+ * store a host float at 'valp', and adjust buffer counters.
+ * NOTE: There is an IEEE standard format for float.
+ */
+int	unpackfloat(float *valp, Buf buffer)
+{
+	uint32_t nl;
+	union {
+		float f;
+		uint32_t u;
+	} uval;
+
+	if (unpack32(&nl, buffer) != SLURM_SUCCESS)
+		return SLURM_ERROR;
+
+	uval.u = nl;
+	*valp = uval.f / FLOAT_MULT;
+
+	return SLURM_SUCCESS;
+}
+
+/*
+ * Given a float, multiple by FLOAT_MULT and then
+ * typecast to a uint32_t in host byte order, convert to network byte order
+ * store in buffer, and adjust buffer counters.
+ * NOTE: There is an IEEE standard format for float.
+ */
+void 	packfloat(float val, Buf buffer)
+{
+	union {
+		float f;
+		uint32_t u;
+	} uval;
+
+	/*
+	 * The FLOAT_MULT is here to round off.  We have found on systems going
+	 * out more than 15 decimals will mess things up, but rounding corrects
+	 * it.
+	 */
+	uval.f = (val * FLOAT_MULT);
+	pack32(uval.u, buffer);
 }
 
 /*
@@ -664,6 +774,35 @@ int unpack8(uint8_t * valp, Buf buffer)
 
 	memcpy(valp, &buffer->head[buffer->processed], sizeof(uint8_t));
 	buffer->processed += sizeof(uint8_t);
+	return SLURM_SUCCESS;
+}
+
+/*
+ * Given a boolean in host byte order, convert to network byte order
+ * store in buffer, and adjust buffer counters.
+ */
+void packbool(bool val, Buf buffer)
+{
+	uint8_t tmp8 = val;
+	pack8(tmp8, buffer);
+}
+
+/*
+ * Given a buffer containing a network byte order 8-bit integer,
+ * store a host integer at 'valp', and adjust buffer counters.
+ */
+int unpackbool(bool * valp, Buf buffer)
+{
+	uint8_t tmp8 = 0;
+
+	if (unpack8(&tmp8, buffer) != SLURM_SUCCESS)
+		return SLURM_ERROR;
+
+	if (tmp8)
+		*valp = tmp8;
+	else
+		*valp = 0;
+
 	return SLURM_SUCCESS;
 }
 

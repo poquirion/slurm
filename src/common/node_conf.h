@@ -86,6 +86,7 @@ extern List front_end_list;	/* list of slurm_conf_frontend_t entries */
 struct node_record {
 	uint32_t magic;			/* magic cookie for data integrity */
 	char *name;			/* name of the node. NULL==defunct */
+	uint32_t next_state;		/* state after reboot */
 	char *node_hostname;		/* hostname of the node */
 	uint32_t node_state;		/* enum node_states, ORed with
 					 * NODE_STATE_NO_RESPOND if not
@@ -138,7 +139,7 @@ struct node_record {
 					 * use for scheduling purposes */
 	List gres_list;			/* list of gres state info managed by
 					 * plugins */
-	uint32_t sched_weight;		/* Node's weight for scheduling
+	uint64_t sched_weight;		/* Node's weight for scheduling
 					 * purposes. For cons_tres use */
 	uint32_t weight;		/* orignal weight, used only for state
 					 * save/restore, DO NOT use for
@@ -150,11 +151,6 @@ struct node_record {
 					 * or other sequence number used to
 					 * order nodes by location,
 					 * no need to save/restore */
-#ifdef HAVE_ALPS_CRAY
-	uint32_t basil_node_id;		/* Cray-XT BASIL node ID,
-					 * no need to save/restore */
-	time_t down_time;		/* When first set to DOWN state */
-#endif	/* HAVE_ALPS_CRAY */
 	acct_gather_energy_t *energy;	/* power consumption data */
 	ext_sensors_data_t *ext_sensors; /* external sensor data */
 	power_mgmt_data_t *power;	/* power management data */

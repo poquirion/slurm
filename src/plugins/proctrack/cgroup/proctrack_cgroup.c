@@ -83,8 +83,6 @@ const char plugin_name[]      = "Process tracking via linux cgroup freezer subsy
 const char plugin_type[]      = "proctrack/cgroup";
 const uint32_t plugin_version = SLURM_VERSION_NUMBER;
 
-static slurm_cgroup_conf_t slurm_cgroup_conf;
-
 static char user_cgroup_path[PATH_MAX];
 static char job_cgroup_path[PATH_MAX];
 static char jobstep_cgroup_path[PATH_MAX];
@@ -107,8 +105,7 @@ int _slurm_cgroup_init(void)
 	jobstep_cgroup_path[0]='\0';
 
 	/* initialize freezer cgroup namespace */
-	if (xcgroup_ns_create(&slurm_cgroup_conf, &freezer_ns, "", "freezer")
-	    != XCGROUP_SUCCESS) {
+	if (xcgroup_ns_create(&freezer_ns, "", "freezer") != XCGROUP_SUCCESS) {
 		error("unable to create freezer cgroup namespace");
 		return SLURM_ERROR;
 	}
@@ -126,9 +123,22 @@ int _slurm_cgroup_init(void)
 
 int _slurm_cgroup_create(stepd_step_rec_t *job, uint64_t id, uid_t uid, gid_t gid)
 {
-	/* we do it here as we do not have access to the conf structure */
-	/* in libslurm (src/common/xcgroup.c) */
-	char *pre = (char *)xstrdup(slurm_cgroup_conf.cgroup_prepend);
+	/*
+	 * we do it here as we do not have access to the conf structure
+	 * in libslurm (src/common/xcgroup.c)
+	 */
+
+	char *pre;
+	slurm_cgroup_conf_t *cg_conf;
+
+	/* read cgroup configuration */
+	slurm_mutex_lock(&xcgroup_config_read_mutex);
+	cg_conf = xcgroup_get_slurm_cgroup_conf();
+
+	pre = xstrdup(cg_conf->cgroup_prepend);
+
+	slurm_mutex_unlock(&xcgroup_config_read_mutex);
+
 #ifdef MULTIPLE_SLURMD
 	if ( conf->node_name != NULL )
 		xstrsubstitute(pre,"%n", conf->node_name);
@@ -283,7 +293,14 @@ int _slurm_cgroup_destroy(void)
 	 *   the rmdir(2) triggered by the calls below will always fail,
 	 *   because slurmstepd is still in the cgroup!
 	 */
-	_move_current_to_root_cgroup(&freezer_ns);
+	if (_move_current_to_root_cgroup(&freezer_ns) != SLURM_SUCCESS) {
+		error("%s: Unable to move pid %d to root cgroup",
+		      __func__, getpid());
+		xcgroup_unlock(&freezer_cg);
+		return SLURM_ERROR;
+	}
+
+	xcgroup_wait_pid_moved(&job_freezer_cg, "freezer job");
 
 	if (jobstep_cgroup_path[0] != '\0') {
 		if (xcgroup_delete(&step_freezer_cg) != XCGROUP_SUCCESS) {
@@ -429,20 +446,14 @@ _slurm_cgroup_is_pid_a_slurm_task(uint64_t id, pid_t pid)
  */
 extern int init (void)
 {
-	/* read cgroup configuration */
-	if (read_slurm_cgroup_conf(&slurm_cgroup_conf))
-		return SLURM_ERROR;
-
 	/* initialize cpuinfo internal data */
 	if (xcpuinfo_init() != XCPUINFO_SUCCESS) {
-		free_slurm_cgroup_conf(&slurm_cgroup_conf);
 		return SLURM_ERROR;
 	}
 
 	/* initialize cgroup internal data */
 	if (_slurm_cgroup_init() != SLURM_SUCCESS) {
 		xcpuinfo_fini();
-		free_slurm_cgroup_conf(&slurm_cgroup_conf);
 		return SLURM_ERROR;
 	}
 
@@ -453,7 +464,6 @@ extern int fini (void)
 {
 	_slurm_cgroup_destroy();
 	xcpuinfo_fini();
-	free_slurm_cgroup_conf(&slurm_cgroup_conf);
 	return SLURM_SUCCESS;
 }
 

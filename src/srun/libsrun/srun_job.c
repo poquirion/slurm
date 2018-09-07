@@ -1244,8 +1244,6 @@ extern void create_srun_job(void **p_job, bool *got_alloc,
 				opt_local = list_next(opt_iter);
 				if (!opt_local)
 					break;
-				if (!global_resp)	/* Used by Cray/ALPS */
-					global_resp = resp;
 				_print_job_information(resp);
 				_set_env_vars(resp, ++pack_offset);
 				_set_env_vars2(resp, pack_offset);
@@ -1264,7 +1262,6 @@ extern void create_srun_job(void **p_job, bool *got_alloc,
 		} else {
 			if (!(resp = allocate_nodes(handle_signals, &opt)))
 				exit(error_exit);
-			global_resp = resp;
 			*got_alloc = true;
 			my_job_id = resp->job_id;
 			_print_job_information(resp);
@@ -1294,7 +1291,6 @@ extern void create_srun_job(void **p_job, bool *got_alloc,
 		}
 		xfree(pack_nodelist);
 
-		global_resp = NULL;
 		if (opt_list) {
 			resp_iter = list_iterator_create(job_resp_list);
 			while ((resp = (resource_allocation_response_msg_t *)
@@ -1345,6 +1341,8 @@ extern void pre_launch_srun_job(srun_job_t *job, bool slurm_started,
 		slurm_step_launch_abort(job->step_ctx);
 		exit(error_exit);
 	}
+
+	env_array_merge(&job->env, (const char **)__environ);
 }
 
 extern void fini_srun(srun_job_t *job, bool got_alloc, uint32_t *global_rc,
@@ -1482,7 +1480,7 @@ static srun_job_t *_job_create_structure(allocation_info_t *ainfo,
  	job->pack_offset = NO_VAL;
 	job->pack_task_offset = NO_VAL;
 
-#if defined HAVE_FRONT_END && !defined HAVE_ALPS_CRAY
+#if defined HAVE_FRONT_END
 	/* Limited job step support */
 	opt_local->overcommit = true;
 	job->nhosts = 1;
@@ -1878,7 +1876,7 @@ static void _set_env_vars2(resource_allocation_response_msg_t *resp,
 	if (resp->qos) {
 		key = _build_key("SLURM_JOB_QOS", pack_offset);
 		if (!getenv(key) &&
-		    (setenvf(NULL, key, "%u", resp->qos) < 0)) {
+		    (setenvf(NULL, key, "%s", resp->qos) < 0)) {
 			error("unable to set %s in environment", key);
 		}
 		xfree(key);
@@ -1887,7 +1885,7 @@ static void _set_env_vars2(resource_allocation_response_msg_t *resp,
 	if (resp->resv_name) {
 		key = _build_key("SLURM_JOB_RESERVATION", pack_offset);
 		if (!getenv(key) &&
-		    (setenvf(NULL, key, "%u", resp->resv_name) < 0)) {
+		    (setenvf(NULL, key, "%s", resp->resv_name) < 0)) {
 			error("unable to set %s in environment", key);
 		}
 		xfree(key);
@@ -1896,7 +1894,7 @@ static void _set_env_vars2(resource_allocation_response_msg_t *resp,
 	if (resp->alias_list) {
 		key = _build_key("SLURM_NODE_ALIASES", pack_offset);
 		if (!getenv(key) &&
-		    (setenvf(NULL, key, "%u", resp->alias_list) < 0)) {
+		    (setenvf(NULL, key, "%s", resp->alias_list) < 0)) {
 			error("unable to set %s in environment", key);
 		}
 		xfree(key);

@@ -44,6 +44,7 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <time.h>
+#include <stdbool.h>
 #include <string.h>
 
 #include "src/common/bitstring.h"
@@ -64,6 +65,7 @@ struct slurm_buf {
 	char *head;
 	uint32_t size;
 	uint32_t processed;
+	bool mmaped;
 };
 
 typedef struct slurm_buf * Buf;
@@ -75,6 +77,7 @@ typedef struct slurm_buf * Buf;
 #define size_buf(__buf)			(__buf->size)
 
 Buf	create_buf (char *data, uint32_t size);
+Buf	create_mmap_buf(char *file);
 void	free_buf(Buf my_buf);
 Buf	init_buf(uint32_t size);
 void    grow_buf (Buf my_buf, uint32_t size);
@@ -82,6 +85,9 @@ void	*xfer_buf_data(Buf my_buf);
 
 void	pack_time(time_t val, Buf buffer);
 int	unpack_time(time_t *valp, Buf buffer);
+
+void 	packfloat(float val, Buf buffer);
+int	unpackfloat(float *valp, Buf buffer);
 
 void 	packdouble(double val, Buf buffer);
 int	unpackdouble(double *valp, Buf buffer);
@@ -100,6 +106,9 @@ int	unpack16(uint16_t *valp, Buf buffer);
 
 void	pack8(uint8_t val, Buf buffer);
 int	unpack8(uint8_t *valp, Buf buffer);
+
+void	packbool(bool val, Buf buffer);
+int	unpackbool(bool *valp, Buf buffer);
 
 void    pack16_array(uint16_t *valp, uint32_t size_val, Buf buffer);
 int     unpack16_array(uint16_t **valp, uint32_t* size_val, Buf buffer);
@@ -142,6 +151,13 @@ int	unpackmem_array(char *valp, uint32_t size_valp, Buf buffer);
 		goto unpack_error;			\
 } while (0)
 
+#define safe_unpackfloat(valp,buf) do {		\
+	assert(sizeof(*valp) == sizeof(float));        \
+	assert(buf->magic == BUF_MAGIC);		\
+        if (unpackfloat(valp,buf))			\
+		goto unpack_error;			\
+} while (0)
+
 #define safe_unpackdouble(valp,buf) do {		\
 	assert(sizeof(*valp) == sizeof(double));        \
 	assert(buf->magic == BUF_MAGIC);		\
@@ -181,6 +197,13 @@ int	unpackmem_array(char *valp, uint32_t size_valp, Buf buffer);
 	assert(sizeof(*valp) == sizeof(uint8_t)); 	\
 	assert(buf->magic == BUF_MAGIC);		\
         if (unpack8(valp,buf))				\
+		goto unpack_error;			\
+} while (0)
+
+#define safe_unpackbool(valp,buf) do {			\
+	assert(sizeof(*valp) == sizeof(bool)); 	\
+	assert(buf->magic == BUF_MAGIC);		\
+        if (unpackbool(valp,buf))				\
 		goto unpack_error;			\
 } while (0)
 

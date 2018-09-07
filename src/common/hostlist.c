@@ -600,7 +600,7 @@ static hostname_t hostname_create_dims(const char *hostname, int dims)
 	hn->num = strtoul(hn->suffix, &p, hostlist_base);
 
 	if (*p == '\0') {
-		if (!(hn->prefix = malloc((idx + 2) * sizeof(char)))) {
+		if (!(hn->prefix = malloc((idx + 2)))) {
 			hostname_destroy(hn);
 			out_of_memory("hostname prefix create");
 		}
@@ -896,7 +896,7 @@ static char *hostrange_pop(hostrange_t hr)
 			out_of_memory("hostrange pop");
 	} else if (hostrange_count(hr) > 0) {
 		size = strlen(hr->prefix) + hr->width + 16;
-		if (!(host = (char *) malloc(size * sizeof(char))))
+		if (!(host = malloc(size)))
 			out_of_memory("hostrange pop");
 		if ((dims > 1) && (hr->width == dims)) {
 			int len = 0;
@@ -938,7 +938,7 @@ static char *hostrange_shift(hostrange_t hr, int dims)
 			out_of_memory("hostrange shift");
 	} else if (hostrange_count(hr) > 0) {
 		size = strlen(hr->prefix) + hr->width + 16;
-		if (!(host = (char *) malloc(size * sizeof(char))))
+		if (!(host = malloc(size)))
 			out_of_memory("hostrange shift");
 		if ((dims > 1) && (hr->width == dims)) {
 			int len = 0;
@@ -1094,30 +1094,40 @@ static int hostrange_hn_within(hostrange_t hr, hostname_t hn, int dims)
 		 */
 		len1  = strlen(hr->prefix);
 		len2  = strlen(hn->prefix);
+
+		/* These are definitely different */
+		if (len1 == len2)
+			return 0;
+
 		ldiff = len1 - len2;
 
-		if (ldiff > 0 && isdigit(hr->prefix[len1-1])
-		    && (strlen(hn->suffix) >= ldiff)) {
-			/* Tack on ldiff of the hostname's suffix to that of
-			 * it's prefix */
+		if (ldiff > 0 && isdigit(hr->prefix[len1-1]) &&
+		    (strlen(hn->suffix) >= ldiff)) {
+			/* Tack on ldiff of the hostname's suffix to
+			 * that of it's prefix */
 			hn->prefix = realloc(hn->prefix, len2+ldiff+1);
 			strncat(hn->prefix, hn->suffix, ldiff);
-			/* Now adjust the suffix of the hostname object. */
-			hn->suffix += ldiff;
-			/* And the numeric representation just in case
-			 * whatever we just tacked on to the prefix
-			 * had something other than 0 in it.
-			 *
-			 * Since we are only going through this logic for
-			 * single dimension systems we will always use
-			 * the base 10.
-			 */
-			hn->num = strtoul(hn->suffix, NULL, 10);
-
-			/* Now compare them and see if they match */
-			if (strcmp(hr->prefix, hn->prefix) != 0)
-				return 0;
+		} else if (ldiff < 0 &&
+			   isdigit(hn->prefix[len2+ldiff])) {
+			/* strip off the ldiff here */
+			hn->prefix[len2+ldiff] = '\0';
 		} else
+			return 0;
+
+		/* Now adjust the suffix of the hostname object. */
+		hn->suffix += ldiff;
+		/* And the numeric representation just in case
+		 * whatever we just tacked on to the prefix
+		 * had something other than 0 in it.
+		 *
+		 * Since we are only going through this logic for
+		 * single dimension systems we will always use
+		 * the base 10.
+		 */
+		hn->num = strtoul(hn->suffix, NULL, 10);
+
+		/* Now compare them and see if they match */
+		if (strcmp(hr->prefix, hn->prefix) != 0)
 			return 0;
 	}
 
@@ -1510,7 +1520,7 @@ hostlist_t _hostlist_create(const char *hostlist, char *sep, char *r_op,
 		 * use the previous prefix and fmt
 		 */
 		if ((pos > 0) || (prefix[0] == '\0')) {
-			memcpy(prefix, tok, (size_t) pos * sizeof(char));
+			memcpy(prefix, tok, (size_t) pos);
 			prefix[pos] = '\0';
 
 			/* push pointer past prefix */
@@ -1793,10 +1803,9 @@ _push_range_list(hostlist_t hl, char *prefix, struct _range *range,
 {
 	int i, k, nr, rc = 0, rc1;
 	char *p, *q;
-	char new_prefix[1024], tmp_prefix[1024];
+	char *new_prefix = NULL;
 
-	strlcpy(tmp_prefix, prefix, sizeof(tmp_prefix));
-	if (((p = strrchr(tmp_prefix, '[')) != NULL) &&
+	if (((p = strrchr(prefix, '[')) != NULL) &&
 	    ((q = strrchr(p, ']')) != NULL)) {
 		struct _range *prefix_range = NULL;
 		int pr_capacity = 0;
@@ -1805,7 +1814,7 @@ _push_range_list(hostlist_t hl, char *prefix, struct _range *range,
 		bool recurse = false;
 		*p++ = '\0';
 		*q++ = '\0';
-		if (strrchr(tmp_prefix, '[') != NULL)
+		if (strrchr(prefix, '[') != NULL)
 			recurse = true;
 		nr = _parse_range_list(p, &prefix_range, &pr_capacity,
 				       MAX_RANGES, dims);
@@ -1823,9 +1832,8 @@ _push_range_list(hostlist_t hl, char *prefix, struct _range *range,
 				return -1;
 			}
 			for (j = pre_range->lo; j <= pre_range->hi; j++) {
-				snprintf(new_prefix, sizeof(new_prefix),
-					 "%s%0*lu%s", tmp_prefix,
-					 pre_range->width, j, q);
+				xstrfmtcat(new_prefix, "%s%0*lu%s",
+					   prefix, pre_range->width, j, q);
 				if (recurse) {
 					rc1 = _push_range_list(hl, new_prefix,
 							       saved_range,
@@ -1841,6 +1849,7 @@ _push_range_list(hostlist_t hl, char *prefix, struct _range *range,
 						range++;
 					}
 				}
+				xfree(new_prefix);
 			}
 			pre_range++;
 		}

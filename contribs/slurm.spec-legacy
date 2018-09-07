@@ -2,8 +2,8 @@
 # DEPRECATED, NOT MAINTAINED, WILL BE REMOVED IN A FUTURE RELEASE.
 
 Name:		slurm
-Version:	18.08.0
-%define rel	0pre1
+Version:	19.05.0
+%define rel	0pre0
 Release:	%{rel}%{?dist}
 Summary:	Slurm Workload Manager
 
@@ -35,7 +35,6 @@ Source:		%{slurm_source_dir}.tar.bz2
 # --with blcr        %_with_blcr          1     require blcr support
 # --with bluegene    %_with_bluegene      1     build bluegene RPM
 # --with cray        %_with_cray          1     build for a Cray system without ALPS
-# --with cray_alps   %_with_cray_alps     1     build for a Cray system with ALPS
 # --with cray_network %_with_cray_network 1     build for a non-Cray system with a Cray network
 # --without debug    %_without_debug      1     don't compile with debugging symbols
 # --with lua         %_with_lua           1     build Slurm lua bindings (proctrack only for now)
@@ -63,7 +62,6 @@ Source:		%{slurm_source_dir}.tar.bz2
 %slurm_without_opt auth_none
 %slurm_without_opt bluegene
 %slurm_without_opt cray
-%slurm_without_opt cray_alps
 %slurm_without_opt cray_network
 %slurm_without_opt salloc_background
 %slurm_without_opt multiple_slurmd
@@ -95,10 +93,6 @@ Source:		%{slurm_source_dir}.tar.bz2
 %slurm_without_opt lua
 %slurm_without_opt partial-attach
 
-%if %{slurm_with cray_alps}
-%slurm_with_opt sgijob
-%endif
-
 Requires: slurm-plugins
 
 %ifos linux
@@ -125,14 +119,6 @@ BuildRequires: openssl-devel >= 0.9.6 openssl >= 0.9.6
 BuildRequires: mysql-devel >= 5.0.0
 %else
 BuildRequires: mariadb-devel >= 5.0.0
-%endif
-%endif
-
-%if %{slurm_with cray_alps}
-%if %{use_mysql_devel}
-BuildRequires: mysql-devel
-%else
-BuildRequires: mariadb-devel
 %endif
 %endif
 
@@ -430,7 +416,7 @@ fi
 
 # Do not package Slurm's version of libpmi on Cray systems.
 # Cray's version of libpmi should be used.
-%if %{slurm_with cray} || %{slurm_with cray_alps}
+%if %{slurm_with cray}
    rm -f $RPM_BUILD_ROOT/%{_libdir}/libpmi*
    %if %{slurm_with cray}
       install -D -m644 contribs/cray/plugstack.conf.template ${RPM_BUILD_ROOT}%{_sysconfdir}/plugstack.conf.template
@@ -448,12 +434,10 @@ fi
 %endif
 
 install -D -m644 etc/cgroup.conf.example ${RPM_BUILD_ROOT}%{_sysconfdir}/cgroup.conf.example
-install -D -m644 etc/cgroup_allowed_devices_file.conf.example ${RPM_BUILD_ROOT}%{_sysconfdir}/cgroup_allowed_devices_file.conf.example
 install -D -m644 etc/layouts.d.power.conf.example ${RPM_BUILD_ROOT}%{_sysconfdir}/layouts.d/power.conf.example
 install -D -m644 etc/layouts.d.power_cpufreq.conf.example ${RPM_BUILD_ROOT}%{_sysconfdir}/layouts.d/power_cpufreq.conf.example
 install -D -m644 etc/layouts.d.unit.conf.example ${RPM_BUILD_ROOT}%{_sysconfdir}/layouts.d/unit.conf.example
 install -D -m644 etc/slurm.conf.example ${RPM_BUILD_ROOT}%{_sysconfdir}/slurm.conf.example
-install -D -m755 etc/slurm.epilog.clean ${RPM_BUILD_ROOT}%{_sysconfdir}/slurm.epilog.clean
 install -D -m644 etc/slurmdbd.conf.example ${RPM_BUILD_ROOT}%{_sysconfdir}/slurmdbd.conf.example
 install -D -m755 contribs/sjstat ${RPM_BUILD_ROOT}%{_bindir}/sjstat
 
@@ -657,8 +641,6 @@ test -f $RPM_BUILD_ROOT/%{_libdir}/slurm/jobcomp_elasticsearch.so    &&
    echo %{_libdir}/slurm/jobcomp_elasticsearch.so    >> $LIST
 test -f $RPM_BUILD_ROOT/%{_libdir}/slurm/launch_slurm.so             &&
    echo %{_libdir}/slurm/launch_slurm.so             >> $LIST
-test -f $RPM_BUILD_ROOT/%{_libdir}/slurm/launch_aprun.so             &&
-   echo %{_libdir}/slurm/launch_aprun.so             >> $LIST
 test -f $RPM_BUILD_ROOT/%{_libdir}/slurm/mpi_pmix.so                 &&
    echo %{_libdir}/slurm/mpi_pmix.so                 >> $LIST
 test -f $RPM_BUILD_ROOT/%{_libdir}/slurm/mpi_pmix_v1.so              &&
@@ -750,7 +732,7 @@ rm -rf $RPM_BUILD_ROOT
 %dir %{_libdir}/slurm/src
 %dir /etc/ld.so.conf.d
 /etc/ld.so.conf.d/slurm.conf
-%if %{slurm_with cray} || %{slurm_with cray_alps}
+%if %{slurm_with cray}
 %dir /opt/modulefiles/slurm
 %endif
 %if %{slurm_with cray}
@@ -759,12 +741,10 @@ rm -rf $RPM_BUILD_ROOT
 %{_sbindir}/slurmconfgen.py
 %endif
 %config %{_sysconfdir}/cgroup.conf.example
-%config %{_sysconfdir}/cgroup_allowed_devices_file.conf.example
 %config %{_sysconfdir}/layouts.d/power.conf.example
 %config %{_sysconfdir}/layouts.d/power_cpufreq.conf.example
 %config %{_sysconfdir}/layouts.d/unit.conf.example
 %config %{_sysconfdir}/slurm.conf.example
-%config %{_sysconfdir}/slurm.epilog.clean
 %exclude %{_mandir}/man1/sjobexit*
 %exclude %{_mandir}/man1/sjstat*
 #############################################################################
@@ -877,7 +857,6 @@ rm -rf $RPM_BUILD_ROOT
 %endif
 %{_libdir}/slurm/mpi_none.so
 %{_libdir}/slurm/power_none.so
-%{_libdir}/slurm/preempt_job_prio.so
 %{_libdir}/slurm/preempt_none.so
 %{_libdir}/slurm/preempt_partition_prio.so
 %{_libdir}/slurm/preempt_qos.so
@@ -891,7 +870,6 @@ rm -rf $RPM_BUILD_ROOT
 %{_libdir}/slurm/sched_backfill.so
 %{_libdir}/slurm/sched_builtin.so
 %{_libdir}/slurm/sched_hold.so
-%{_libdir}/slurm/select_alps.so
 %{_libdir}/slurm/select_cray.so
 %{_libdir}/slurm/select_cons_res.so
 %{_libdir}/slurm/select_linear.so

@@ -573,8 +573,8 @@ enum select_plugin_type {
 	SELECT_PLUGIN_CONS_RES       = 101, /* Cons Res on a normal system */
 	SELECT_PLUGIN_LINEAR         = 102, /* Linear on a normal system */
 	/* 103 unused (originally used for BGQ) */
-	SELECT_PLUGIN_ALPS           = 104, /* Alps using Linear (only option) */
-	/* 105 unused (originally was for ALPS cons_res which won't happen) */
+	/* 104 unused (originally used for Cray/ALPS with select/linear) */
+	/* 105 unused (originally used for Cray/ALPS with select/cons_res) */
 	SELECT_PLUGIN_SERIAL         = 106, /* Serial */
 	SELECT_PLUGIN_CRAY_LINEAR    = 107, /* Linear on a Native Cray */
 	SELECT_PLUGIN_CRAY_CONS_RES  = 108, /* Cons Res on a Native Cray */
@@ -591,12 +591,10 @@ enum switch_plugin_type {
 };
 
 enum select_jobdata_type {
-	SELECT_JOBDATA_RESV_ID	= 13,	/* data-> uint32_t reservation_id */
 	SELECT_JOBDATA_PAGG_ID	= 14,	/* data-> uint64_t job container ID */
 	SELECT_JOBDATA_PTR	= 15,	/* data-> select_jobinfo_t *jobinfo */
 	SELECT_JOBDATA_BLOCK_PTR = 16,	/* data-> bg_record_t *bg_record */
 	SELECT_JOBDATA_DIM_CNT	= 17,	/* data-> uint16_t dim_cnt */
-	SELECT_JOBDATA_CONFIRMED = 21,	/* data-> uint8_t ALPS reservation confirmed */
 	SELECT_JOBDATA_CLEANING	= 22,	/* data-> uint16_t if the job is in
 					 * cleaning state or not. */
 	SELECT_JOBDATA_NETWORK	= 23,	/* data-> char * network info */
@@ -890,6 +888,7 @@ enum node_states {
 					  * configure a node */
 #define NODE_STATE_MAINT      0x00008000 /* node in maintenance reservation */
 #define NODE_STATE_REBOOT     0x00010000 /* node reboot requested */
+#define NODE_STATE_CANCEL_REBOOT 0x00020000 /* cancel pending reboot */
 
 /* used to define the size of the credential.signature size
  * used to define the key size of the io_stream_header_t
@@ -1038,6 +1037,8 @@ enum ctx_keys {
 					 * operation */
 #define JOB_ACCRUE_OVER    0x00040000	/* We have cleared the accrual count of
 					 * a job. */
+#define GRES_DISABLE_BIND  0x00080000	/* Disable CPU/GRES binding */
+#define JOB_MEM_SET        0x00100000	/* Memory limit explicity set by job */
 
 #define X11_FORWARD_ALL		0x0001	/* all nodes should setup forward */
 #define X11_FORWARD_BATCH	0x0002  /* only the batch node */
@@ -1493,6 +1494,7 @@ typedef struct job_descriptor {	/* For submit, allocate, and update requests */
 	uint16_t requeue;	/* enable or disable job requeue option */
 	char *reservation;	/* name of reservation to use */
 	char *script;		/* the actual job script, default NONE */
+	void *script_buf;	/* job script as mmap buf */
 	uint16_t shared;	/* 2 if the job can only share nodes with other
 				 *   jobs owned by that user,
 				 * 1 if job can share nodes with other jobs,
@@ -1622,7 +1624,7 @@ typedef struct job_info {
 	char *fed_siblings_viable_str; /* string of viable sibling names */
 	uint32_t gres_detail_cnt; /* Count of gres_detail_str records,
 				 * one per allocated node */
-	char **gres_detail_str;	/* Details of GRES index alloc per node */
+	char **gres_detail_str;	/* Details of GRES count/index alloc per node */
 	uint32_t group_id;	/* group job submitted as */
 	uint32_t job_id;	/* job ID */
 	job_resources_t *job_resrcs; /* opaque data type, job resources */
@@ -2132,6 +2134,7 @@ typedef struct node_info {
 	char *mcs_label;	/* mcs label if mcs plugin in use */
 	uint64_t mem_spec_limit; /* MB memory limit for specialization */
 	char *name;		/* node name to slurm */
+	uint32_t next_state;	/* state after reboot (enum node_states) */
 	char *node_addr;	/* communication name (optional) */
 	char *node_hostname;	/* node's hostname (optional) */
 	uint32_t node_state;	/* see enum node_states */
@@ -2675,6 +2678,7 @@ typedef struct slurm_ctl_conf {
 	uint16_t group_time;    /* update group time interval */
 	uint16_t group_force;   /* update group/partition info even if no change
 				 * detected */
+	char *gpu_freq_def;	/* default GPU frequency / voltage */
 	uint32_t hash_val;      /* Hash value of the slurm.conf file */
 	uint16_t health_check_interval;	/* secs between health checks */
 	uint16_t health_check_node_state; /* Node states on which to execute
@@ -2946,6 +2950,7 @@ typedef struct stats_info_response_msg {
 	time_t req_time_start;
 	uint32_t server_thread_count;
 	uint32_t agent_queue_size;
+	uint32_t agent_count;
 	uint32_t dbd_agent_queue_size;
 	uint32_t gettimeofday_latency;
 
@@ -2991,6 +2996,14 @@ typedef struct stats_info_response_msg {
 	uint32_t *rpc_user_id;
 	uint32_t *rpc_user_cnt;
 	uint64_t *rpc_user_time;
+
+	uint32_t rpc_queue_type_count;
+	uint32_t *rpc_queue_type_id;
+	uint32_t *rpc_queue_count;
+
+	uint32_t rpc_dump_count;
+	uint32_t *rpc_dump_types;
+	char **rpc_dump_hostlist;
 } stats_info_response_msg_t;
 
 #define TRIGGER_FLAG_PERM		0x0001
@@ -3031,6 +3044,7 @@ typedef struct trigger_info {
 	uint32_t trig_id;	/* trigger ID */
 	uint16_t res_type;	/* TRIGGER_RES_TYPE_* */
 	char *   res_id;	/* resource ID */
+	uint32_t control_inx;	/* controller index */
 	uint32_t trig_type;	/* TRIGGER_TYPE_* */
 	uint16_t offset;	/* seconds from trigger, 0x8000 origin */
 	uint32_t user_id;	/* user requesting trigger */

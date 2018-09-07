@@ -373,6 +373,8 @@ PMIX_V1_CPPFLAGS = @PMIX_V1_CPPFLAGS@
 PMIX_V1_LDFLAGS = @PMIX_V1_LDFLAGS@
 PMIX_V2_CPPFLAGS = @PMIX_V2_CPPFLAGS@
 PMIX_V2_LDFLAGS = @PMIX_V2_LDFLAGS@
+PMIX_V3_CPPFLAGS = @PMIX_V3_CPPFLAGS@
+PMIX_V3_LDFLAGS = @PMIX_V3_LDFLAGS@
 PROJECT = @PROJECT@
 PTHREAD_CC = @PTHREAD_CC@
 PTHREAD_CFLAGS = @PTHREAD_CFLAGS@
@@ -482,7 +484,7 @@ target_vendor = @target_vendor@
 top_build_prefix = @top_build_prefix@
 top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
-SUBDIRS = job_prio none partition_prio qos
+SUBDIRS = none partition_prio qos
 all: all-recursive
 
 .SUFFIXES:

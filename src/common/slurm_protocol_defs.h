@@ -149,6 +149,8 @@
 	(_X->node_state & NODE_STATE_MAINT)
 #define IS_NODE_REBOOT(_X)		\
 	(_X->node_state & NODE_STATE_REBOOT)
+#define IS_NODE_RUNNING_JOB(_X)		\
+	(_X->comp_job_cnt || _X->run_job_cnt || _X->sus_job_cnt)
 
 #define THIS_FILE ((strrchr(__FILE__, '/') ?: __FILE__ - 1) + 1)
 #define INFO_LINE(fmt, ...) \
@@ -700,7 +702,9 @@ typedef struct epilog_complete_msg {
 typedef struct reboot_msg {
 	char *features;
 	uint16_t flags;
+	uint32_t next_state;		/* state after reboot */
 	char *node_list;
+	char *reason;
 } reboot_msg_t;
 
 typedef struct shutdown_msg {
@@ -958,6 +962,7 @@ typedef struct kill_job_msg {
 	uint32_t job_state;
 	uint32_t job_uid;
 	char *nodes;
+	uint32_t pack_jobid;
 	dynamic_plugin_data_t *select_jobinfo;	/* opaque data type */
 	char **spank_job_env;
 	uint32_t spank_job_env_size;
@@ -1000,6 +1005,7 @@ typedef struct prolog_launch_msg {
 	uint64_t job_mem_limit;		/* job's memory limit, passed via cred */
 	uint32_t nnodes;			/* count of nodes, passed via cred */
 	char *nodes;			/* list of nodes allocated to job_step */
+	uint32_t pack_job_id;		/* pack job_id or NO_VAL */
 	char *partition;		/* partition the job is running in */
 	dynamic_plugin_data_t *select_jobinfo;	/* opaque data type */
 	char **spank_job_env;		/* SPANK job environment variables */
@@ -1025,6 +1031,7 @@ typedef struct batch_job_launch_msg {
 	uint32_t cpu_freq_max;  /* Maximum cpu frequency  */
 	uint32_t cpu_freq_gov;  /* cpu frequency governor */
 	uint32_t job_id;
+	uint32_t pack_jobid;
 	uint32_t step_id;
 	uint32_t uid;
 	uint32_t gid;
@@ -1050,6 +1057,7 @@ typedef struct batch_job_launch_msg {
 	char *nodes;		/* list of nodes allocated to job_step */
 	uint32_t profile;       /* what to profile for the batch step */
 	char *script;		/* the actual job script, default NONE */
+	Buf script_buf;		/* the job script as a mmap buf */
 	char *std_err;		/* pathname of stderr */
 	char *std_in;		/* pathname of stdin */
 	char *qos;              /* qos the job is running under */
@@ -1168,7 +1176,7 @@ typedef struct multi_core_data {
 	uint16_t cores_per_socket;	/* cores per cpu required by job */
 	uint16_t threads_per_core;	/* threads per core required by job */
 
-	uint16_t ntasks_per_board;  /* number of tasks to invoke on each board*/
+	uint16_t ntasks_per_board;  /* number of tasks to invoke on each board */
 	uint16_t ntasks_per_socket; /* number of tasks to invoke on each socket */
 	uint16_t ntasks_per_core;   /* number of tasks to invoke on each core */
 	uint16_t plane_size;        /* plane size when task_dist = SLURM_DIST_PLANE */
@@ -1336,6 +1344,8 @@ extern void slurm_destroy_uint32_ptr(void *object);
 extern char *slurm_add_slash_to_quotes(char *str);
 extern List slurm_copy_char_list(List char_list);
 extern int slurm_addto_char_list(List char_list, char *names);
+extern int slurm_addto_char_list_with_case(List char_list, char *names,
+					   bool lower_case_normalization);
 extern int slurm_addto_mode_char_list(List char_list, char *names, int mode);
 extern int slurm_addto_step_list(List step_list, char *names);
 extern int slurm_char_list_copy(List dst, List src);
@@ -1381,6 +1391,7 @@ extern void slurm_free_ping_slurmd_resp(ping_slurmd_resp_msg_t *msg);
 #define	slurm_free_timelimit_msg(msg) \
 	slurm_free_kill_job_msg(msg)
 
+extern void slurm_init_reboot_msg(reboot_msg_t * msg, bool clear);
 extern void slurm_free_reboot_msg(reboot_msg_t * msg);
 
 extern void slurm_free_shutdown_msg(shutdown_msg_t * msg);
@@ -1473,6 +1484,7 @@ extern void slurm_free_job_step_info_members (job_step_info_t * msg);
 extern void slurm_free_front_end_info_msg (front_end_info_msg_t * msg);
 extern void slurm_free_front_end_info_members(front_end_info_t * front_end);
 extern void slurm_free_node_info_msg(node_info_msg_t * msg);
+extern void slurm_init_node_info_t(node_info_t * msg, bool clear);
 extern void slurm_free_node_info_members(node_info_t * node);
 extern void slurm_free_partition_info_msg(partition_info_msg_t * msg);
 extern void slurm_free_partition_info_members(partition_info_t * part);

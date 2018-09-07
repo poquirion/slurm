@@ -45,6 +45,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -142,7 +143,7 @@ static slurm_protocol_config_t *_slurm_api_get_comm_config(void)
 		goto cleanup;
 	}
 	if (conf->control_cnt == 0) {
-		error("No slurmctld servers cvonfigured");
+		error("No slurmctld servers configured");
 		goto cleanup;
 	}
 
@@ -2236,7 +2237,27 @@ extern uint16_t slurm_get_ext_sensors_freq(void)
 	return freq;
 }
 
-/* slurm_get_jobcomp_type
+/*
+ * slurm_get_jobcomp_type
+ * returns the configured GpuFreqDef value
+ * RET char *    - GpuFreqDef value,  MUST be xfreed by caller
+ */
+char *slurm_get_gpu_freq_def(void)
+{
+	char *gpu_freq_def = NULL;
+	slurm_ctl_conf_t *conf;
+
+	if (slurmdbd_conf) {
+	} else {
+		conf = slurm_conf_lock();
+		gpu_freq_def = xstrdup(conf->gpu_freq_def);
+		slurm_conf_unlock();
+	}
+	return gpu_freq_def;
+}
+
+/*
+ * slurm_get_jobcomp_type
  * returns the job completion logger type from slurmctld_conf object
  * RET char *    - job completion type,  MUST be xfreed by caller
  */
@@ -3030,7 +3051,7 @@ int slurm_init_msg_engine_ports(uint16_t *ports)
 		return -1;
 	}
 
-	cc = listen(s, SLURM_PROTOCOL_DEFAULT_LISTEN_BACKLOG);
+	cc = listen(s, SLURM_DEFAULT_LISTEN_BACKLOG);
 	if (cc < 0) {
 		close(s);
 		return -1;
@@ -3053,33 +3074,6 @@ int slurm_init_msg_engine_addrname_port(char *addr_name, uint16_t port)
 	slurm_setup_sockaddr(&addr, port);
 
 	return slurm_init_msg_engine(&addr);
-}
-
-/*
- *  Close an established message engine.
- *    Returns SLURM_SUCCESS or SLURM_FAILURE.
- *
- * IN  fd  - an open file descriptor to close
- * RET int - the return code
- */
-int slurm_shutdown_msg_engine(int fd)
-{
-	int rc = close(fd);
-	if (rc)
-		slurm_seterrno(SLURM_COMMUNICATIONS_SHUTDOWN_ERROR);
-	return rc;
-}
-
-/*
- *   Close an established message connection.
- *     Returns SLURM_SUCCESS or SLURM_FAILURE.
- *
- * IN  fd  - an open file descriptor to close
- * RET int - the return code
- */
-int slurm_shutdown_msg_conn(int fd)
-{
-	return close(fd);
 }
 
 /**********************************************************************\
@@ -3122,16 +3116,14 @@ extern int slurm_open_controller_conn(slurm_addr_t *addr, bool *use_backup,
 		/* This means the addr wasn't set up already */
 		if (!(proto_conf = _slurm_api_get_comm_config()))
 			return SLURM_FAILURE;
-		if (proto_conf->control_cnt) {
-			proto_conf->controller_addr[0].sin_port =
+
+		for (i = 0; i < proto_conf->control_cnt; i++) {
+			proto_conf->controller_addr[i].sin_port =
 					htons(slurmctld_conf.slurmctld_port +
 					(((time(NULL) + getpid()) %
 					slurmctld_conf.slurmctld_port_count)));
 		}
-		for (i = 1; i < proto_conf->control_cnt; i++) {
-			proto_conf->controller_addr[i].sin_port =
-					proto_conf->controller_addr[0].sin_port;
-		}
+
 		if (proto_conf->vip_addr_set) {
 			proto_conf->vip_addr.sin_port =
 					htons(slurmctld_conf.slurmctld_port +
@@ -3176,8 +3168,8 @@ extern int slurm_open_controller_conn(slurm_addr_t *addr, bool *use_backup,
 				}
 				debug("Failed to contact primary controller: %m");
 			}
-			if ((proto_conf->control_cnt > 0) || *use_backup) {
-				for (i = 1; i <= proto_conf->control_cnt; i++) {
+			if ((proto_conf->control_cnt > 1) || *use_backup) {
+				for (i = 1; i < proto_conf->control_cnt; i++) {
 					fd = slurm_open_msg_conn(
 						&proto_conf->controller_addr[i]);
 					if (fd >= 0) {
@@ -3773,7 +3765,7 @@ int slurm_receive_msg_and_forward(int fd, slurm_addr_t *orig_addr,
 
 		msg->forward_struct->buf_len = remaining_buf(buffer);
 		msg->forward_struct->buf =
-			xmalloc(sizeof(char) * msg->forward_struct->buf_len);
+			xmalloc(msg->forward_struct->buf_len);
 		memcpy(msg->forward_struct->buf,
 		       &buffer->head[buffer->processed],
 		       msg->forward_struct->buf_len);
@@ -4005,9 +3997,8 @@ int slurm_send_node_msg(int fd, slurm_msg_t * msg)
 	/*
 	 * Send message
 	 */
-	rc = slurm_msg_sendto( fd, get_buf_data(buffer),
-			       get_buf_offset(buffer),
-			       SLURM_PROTOCOL_NO_SEND_RECV_FLAGS );
+	rc = slurm_msg_sendto(fd, get_buf_data(buffer),
+			      get_buf_offset(buffer));
 
 	if ((rc < 0) && (errno == ENOTCONN)) {
 		debug3("slurm_msg_sendto: peer has disappeared for msg_type=%u",
@@ -4413,18 +4404,8 @@ static int
 _send_and_recv_msg(int fd, slurm_msg_t *req,
 		   slurm_msg_t *resp, int timeout)
 {
-	int retry = 0;
 	int rc = slurm_send_recv_msg(fd, req, resp, timeout);
-
-	/*
-	 *  Attempt to close an open connection
-	 */
-	while ((slurm_shutdown_msg_conn(fd) < 0) && (errno == EINTR) ) {
-		if (retry++ > MAX_SHUTDOWN_RETRY) {
-			break;
-		}
-	}
-
+	(void) close(fd);
 	return rc;
 }
 
@@ -4442,7 +4423,6 @@ _send_and_recv_msg(int fd, slurm_msg_t *req,
 static List
 _send_and_recv_msgs(int fd, slurm_msg_t *req, int timeout)
 {
-	int retry = 0;
 	List ret_list = NULL;
 	int steps = 0;
 
@@ -4475,15 +4455,7 @@ _send_and_recv_msgs(int fd, slurm_msg_t *req, int timeout)
 		ret_list = slurm_receive_msgs(fd, steps, timeout);
 	}
 
-
-	/*
-	 *  Attempt to close an open connection
-	 */
-	while ((slurm_shutdown_msg_conn(fd) < 0) && (errno == EINTR) ) {
-		if (retry++ > MAX_SHUTDOWN_RETRY) {
-			break;
-		}
-	}
+	(void) close(fd);
 
 	return ret_list;
 }
@@ -4635,7 +4607,6 @@ extern int slurm_send_only_controller_msg(slurm_msg_t *req,
 				slurmdb_cluster_rec_t *comm_cluster_rec)
 {
 	int      rc = SLURM_SUCCESS;
-	int      retry = 0;
 	int fd = -1;
 	slurm_addr_t ctrl_addr;
 	bool     use_backup = false;
@@ -4656,15 +4627,7 @@ extern int slurm_send_only_controller_msg(slurm_msg_t *req,
 		rc = SLURM_SUCCESS;
 	}
 
-	/*
-	 *  Attempt to close an open connection
-	 */
-	while ( (slurm_shutdown_msg_conn(fd) < 0) && (errno == EINTR) ) {
-		if (retry++ > MAX_SHUTDOWN_RETRY) {
-			rc = SLURM_SOCKET_ERROR;
-			goto cleanup;
-		}
-	}
+	(void) close(fd);
 
 cleanup:
 	if (rc != SLURM_SUCCESS)
@@ -4677,12 +4640,35 @@ cleanup:
  *   Then, immediately close the connection w/out waiting for a reply.
  *
  *   Returns SLURM_SUCCESS on success SLURM_FAILURE (< 0) for failure.
+ *
+ * DO NOT USE THIS IN NEW CODE
+ * Use slurm_send_recv_rc_msg_only_one() or something similar instead.
+ *
+ * By not waiting for a response message, the message to be transmitted
+ * may never be received by the remote end. The remote TCP stack may
+ * acknowledge the data while the application itself has not had a chance
+ * to receive it. The only way to tell that the application has processed
+ * a given packet is for it to send back a message across the socket itself.
+ *
+ * The receive side looks like: poll() && read(), close(). If the poll() times
+ * out, the kernel may still ACK the data while the application has jumped to
+ * closing the connection. The send side cannot then distinguish between the
+ * close happening as a result of the timeout vs. as a normal message shutdown.
+ *
+ * This is only one example of the many races inherent in this approach.
+ *
+ * See "UNIX Network Programming" Volume 1 (Third Edition) Section 7.5 on
+ * SO_LINGER for a description of the subtle hazards inherent in abusing
+ * TCP as a unidirectional pipe.
  */
 int slurm_send_only_node_msg(slurm_msg_t *req)
 {
 	int rc = SLURM_SUCCESS;
-	int retry = 0;
 	int fd = -1;
+	struct pollfd pfd;
+	int timeout = slurm_get_msg_timeout();
+	int value = -1;
+	int pollrc;
 
 	if ((fd = slurm_open_msg_conn(&req->address)) < 0) {
 		return SLURM_SOCKET_ERROR;
@@ -4691,18 +4677,85 @@ int slurm_send_only_node_msg(slurm_msg_t *req)
 	if ((rc = slurm_send_node_msg(fd, req)) < 0) {
 		rc = SLURM_ERROR;
 	} else {
-		debug3("slurm_send_only_node_msg: sent %d", rc);
+		debug3("%s: sent %d", __func__, rc);
 		rc = SLURM_SUCCESS;
 	}
+
 	/*
-	 *  Attempt to close an open connection
+	 * Make sure message was received by remote, and that there isn't
+	 * and outstanding write() or that the connection has been reset.
+	 *
+	 * The shutdown() call intentionally falls through to the next block,
+	 * the poll() should hit POLLERR which gives the TICOUTQ count as an
+	 * additional diagnostic element.
+	 *
+	 * The steps below may result in a false-positive on occassion, in
+	 * which case the code path above may opt to retransmit an already
+	 * received message. If this is a concern, you should not be using
+	 * this function.
 	 */
-	while ( (slurm_shutdown_msg_conn(fd) < 0) && (errno == EINTR) ) {
-		if (retry++ > MAX_SHUTDOWN_RETRY)
-			return SLURM_SOCKET_ERROR;
+	if (shutdown(fd, SHUT_WR))
+		debug("%s: shutdown call failed: %m", __func__);
+
+again:
+	pfd.fd = fd;
+	pfd.events = POLLIN;
+	pollrc = poll(&pfd, 1, timeout);
+	if (pollrc == -1) {
+		if (errno == EINTR)
+			goto again;
+		debug("%s: poll error: %m", __func__);
+		(void) close(fd);
+		return SLURM_ERROR;
 	}
 
+	if (pollrc == 0) {
+		if (ioctl(fd, TIOCOUTQ, &value))
+			debug("%s: TIOCOUTQ ioctl failed", __func__);
+		debug("%s: poll timed out with %d outstanding: %m", __func__, value);
+		(void) close(fd);
+		return SLURM_ERROR;
+	}
+
+	if (pfd.revents & POLLERR) {
+		int err;
+		socklen_t errlen = sizeof(err);
+		int value = -1;
+
+		if (ioctl(fd, TIOCOUTQ, &value))
+			debug("%s: TIOCOUTQ ioctl failed", __func__);
+		if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen))
+			debug("%s: getsockopt error with %d outstanding: %m",
+			      __func__, value);
+		else
+			debug("%s: poll error with %d outstanding: %s",
+			      __func__, value, strerror(err));
+		(void) close(fd);
+		return SLURM_ERROR;
+	}
+
+	(void) close(fd);
+
 	return rc;
+}
+
+/*
+ * Open a connection to the "address" specified in the slurm msg `req'
+ * Then, immediately close the connection w/out waiting for a reply.
+ * Ignore any errors. This should only be used when you do not care if
+ * the message is ever received.
+ */
+void slurm_send_msg_maybe(slurm_msg_t *req)
+{
+	int fd = -1;
+
+	if ((fd = slurm_open_msg_conn(&req->address)) < 0) {
+		return;
+	}
+
+	(void) slurm_send_node_msg(fd, req);
+
+	(void) close(fd);
 }
 
 /*

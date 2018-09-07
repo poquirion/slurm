@@ -56,8 +56,12 @@ static char *_average_tres_usage(uint32_t *tres_ids, uint64_t *tres_cnts,
 	char *ret_str = NULL;
 	int i;
 
+	/*
+	 * Don't return NULL here, we need a blank string or we will print
+	 * '(null)' in the database which really isn't what we want.
+	 */
 	if (!tasks)
-		return ret_str;
+		return xstrdup("");
 
 	for (i = 0; i < tres_cnt; i++) {
 		if (tres_cnts[i] == INFINITE64)
@@ -67,6 +71,8 @@ static char *_average_tres_usage(uint32_t *tres_ids, uint64_t *tres_cnts,
 			   tres_ids[i], tres_cnts[i] / (uint64_t)tasks);
 	}
 
+	if (!ret_str)
+		ret_str = xstrdup("");
 	return ret_str;
 }
 
@@ -173,7 +179,8 @@ static uint32_t _get_wckeyid(mysql_conn_t *mysql_conn, char **name,
 			user_rec.uid = NO_VAL;
 			user_rec.name = user;
 			if (assoc_mgr_fill_in_user(mysql_conn, &user_rec,
-						   1, NULL) != SLURM_SUCCESS) {
+						   1, NULL, false)
+			    != SLURM_SUCCESS) {
 				error("No user by name of %s assoc %u",
 				      user, associd);
 				xfree(user);
@@ -194,7 +201,7 @@ static uint32_t _get_wckeyid(mysql_conn_t *mysql_conn, char **name,
 		wckey_rec.cluster = cluster;
 		if (assoc_mgr_fill_in_wckey(mysql_conn, &wckey_rec,
 					    ACCOUNTING_ENFORCE_WCKEYS,
-					    NULL) != SLURM_SUCCESS) {
+					    NULL, false) != SLURM_SUCCESS) {
 			List wckey_list = NULL;
 			slurmdb_wckey_rec_t *wckey_ptr = NULL;
 			/* we have already checked to make
@@ -218,7 +225,7 @@ static uint32_t _get_wckeyid(mysql_conn_t *mysql_conn, char **name,
 				if (assoc_mgr_fill_in_wckey(
 					    mysql_conn, &wckey_rec,
 					    ACCOUNTING_ENFORCE_WCKEYS,
-					    NULL) != SLURM_SUCCESS) {
+					    NULL, false) != SLURM_SUCCESS) {
 					wckey_ptr = xmalloc(
 						sizeof(slurmdb_wckey_rec_t));
 					wckey_ptr->name =
@@ -243,7 +250,7 @@ static uint32_t _get_wckeyid(mysql_conn_t *mysql_conn, char **name,
 			/* If that worked lets get it */
 			assoc_mgr_fill_in_wckey(mysql_conn, &wckey_rec,
 						ACCOUNTING_ENFORCE_WCKEYS,
-						NULL);
+						NULL, false);
 
 			FREE_NULL_LIST(wckey_list);
 		}
@@ -255,70 +262,6 @@ no_wckeyid:
 	return wckeyid;
 }
 
-static char *_set_energy_tres(mysql_conn_t *mysql_conn,
-			      struct job_record *job_ptr)
-{
-	int row_cnt = 0;
-	uint64_t *tres_alloc_cnt = NULL;
-	char *tres_alloc_str = NULL;
-	MYSQL_RES *result = NULL;
-	MYSQL_ROW row;
-	char * query = xstrdup_printf(
-		"select job.tres_alloc, SUM(consumed_energy) from "
-		"\"%s_%s\" as job left outer join \"%s_%s\" "
-		"as step on job.job_db_inx=step.job_db_inx "
-		"and (step.id_step>=0) and step.consumed_energy != %"PRIu64
-		" where job.job_db_inx=%"PRIu64";",
-		mysql_conn->cluster_name, job_table,
-		mysql_conn->cluster_name, step_table,
-		NO_VAL64, job_ptr->db_index);
-	if (debug_flags & DEBUG_FLAG_DB_USAGE)
-		DB_DEBUG(mysql_conn->conn, "query\n%s", query);
-	result = mysql_db_query_ret(mysql_conn, query, 0);
-	xfree(query);
-	if (!result)
-		return NULL;
-
-	row_cnt = mysql_num_rows(result);
-
-	if (!row_cnt) {
-		DB_DEBUG(mysql_conn->conn,
-			 "Nothing for job inx %"PRIu64" from cluster %s, this should never happen",
-			 job_ptr->db_index,
-			 mysql_conn->cluster_name);
-	} else {
-		if (row_cnt > 1)
-			error("Some how with job inx %"PRIu64" from cluster %s we got %d rows for consumed energy.  This should never happen, only taking the first one.",
-			      job_ptr->db_index,
-			      mysql_conn->cluster_name,
-			      row_cnt);
-		row = mysql_fetch_row(result);
-
-		if (job_ptr->tres_alloc_str)
-			tres_alloc_str = xstrdup(job_ptr->tres_alloc_str);
-		else if (row[0] && row[0][0])
-			tres_alloc_str = xstrdup(row[0]);
-
-		assoc_mgr_set_tres_cnt_array(
-			&tres_alloc_cnt, tres_alloc_str, 0, false);
-		xfree(tres_alloc_str);
-		if (row[1] && row[1][0]) {
-			if (tres_alloc_cnt[TRES_ARRAY_ENERGY] &&
-			    tres_alloc_cnt[TRES_ARRAY_ENERGY] != NO_VAL64)
-				debug("we had %"PRIu64" for energy, but we are over writing it with %s",
-				      tres_alloc_cnt[TRES_ARRAY_ENERGY],
-				      row[1]);
-			tres_alloc_cnt[TRES_ARRAY_ENERGY] =
-				slurm_atoull(row[1]);
-		} else if (!tres_alloc_cnt[TRES_ARRAY_ENERGY] ||
-			   tres_alloc_cnt[TRES_ARRAY_ENERGY] != NO_VAL64)
-			tres_alloc_cnt[TRES_ARRAY_ENERGY] = NO_VAL64;
-	}
-	mysql_free_result(result);
-
-	return assoc_mgr_make_tres_str_from_array(
-		tres_alloc_cnt, TRES_STR_FLAG_SIMPLE, true);
-}
 /* extern functions */
 
 extern int as_mysql_job_start(mysql_conn_t *mysql_conn,
@@ -511,24 +454,6 @@ no_rollup_change:
 		partition = job_ptr->partition;
 
 	if (!job_ptr->db_index) {
-		if (start_time && (job_state >= JOB_COMPLETE) &&
-		    (!job_ptr->tres_alloc_str &&
-		     (slurmdbd_conf &&
-		      (job_ptr->start_protocol_ver <=
-		       SLURM_17_02_PROTOCOL_VERSION)))) {
-			/* Since we now rollup from only the job table we need
-			 * to grab all the consumed_energy from the steps
-			 * running while we were on the old version of Slurm.
-			 * This only has to happen here if we have already
-			 * started the job otherwise we will just have to do it
-			 * again.  This can be removed when 17.02 is 2 versions
-			 * old.
-			 */
-			if (!(tres_alloc_str = _set_energy_tres(
-				      mysql_conn, job_ptr)))
-				goto end_it;
-		}
-
 		query = xstrdup_printf(
 			"insert into \"%s_%s\" "
 			"(id_job, mod_time, id_array_job, id_array_task, "
@@ -782,7 +707,7 @@ no_rollup_change:
 		if (IS_JOB_SUSPENDED(job_ptr))
 			as_mysql_suspend(mysql_conn, job_db_inx, job_ptr);
 	}
-end_it:
+
 	xfree(tres_alloc_str);
 	xfree(query);
 
@@ -1001,19 +926,6 @@ extern int as_mysql_job_complete(mysql_conn_t *mysql_conn,
 			}
 			job_ptr->comment = comment;
 		}
-	} else if (!job_ptr->tres_alloc_str &&
-		   (slurmdbd_conf &&
-		    (job_ptr->start_protocol_ver <=
-		     SLURM_17_02_PROTOCOL_VERSION))) {
-		/* Since we now rollup from only the job table we need to grab
-		 * all the consumed_energy from the steps running while we were
-		 * on the old version of Slurm.
-		 * This only has to happen here if we have already started the
-		 * job otherwise we will just have to do it again.
-		 * This can be removed when 17.02 is 2 versions old.
-		 */
-		if (!(tres_alloc_str = _set_energy_tres(mysql_conn, job_ptr)))
-			goto end_it;
 	}
 
 	/*
@@ -1065,7 +977,7 @@ extern int as_mysql_job_complete(mysql_conn_t *mysql_conn,
 		DB_DEBUG(mysql_conn->conn, "query\n%s", query);
 	rc = mysql_db_query(mysql_conn, query);
 	xfree(query);
-end_it:
+
 	xfree(tres_alloc_str);
 	return rc;
 }

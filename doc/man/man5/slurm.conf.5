@@ -1,4 +1,4 @@
-.TH "slurm.conf" "5" "Slurm Configuration File" "June 2018" "Slurm Configuration File"
+.TH "slurm.conf" "5" "Slurm Configuration File" "August 2018" "Slurm Configuration File"
 
 .SH "NAME"
 slurm.conf \- Slurm configuration file
@@ -448,9 +448,10 @@ used for all other system types
 
 .TP
 \fBCpuFreqDef\fR
-Default CPU frequency governor to use when running a job step if it
-has not been explicitly set with the \-\-cpu\-freq option.
-Acceptable values at present include:
+Default CPU frequency value or frequency governor to use when running a
+job step if it has not been explicitly set with the \-\-cpu\-freq option.
+Acceptable values at present include a numeric value (frequency in kilohertz)
+or one of the following governors:
 .RS
 .TP 14
 \fBConservative\fR
@@ -479,18 +480,18 @@ Acceptable values at present include:
 attempts to use the Conservative CPU governor
 .TP
 \fBOnDemand\fR
-attempts to use the OnDemand CPU governor (the default value)
+attempts to use the OnDemand CPU governor (a default value)
 .TP
 \fBPerformance\fR
-attempts to use the Performance CPU governor (the default value)
+attempts to use the Performance CPU governor (a default value)
 .TP
 \fBPowerSave\fR
 attempts to use the PowerSave CPU governor
 .TP
 \fBUserSpace\fR
-attempts to use the UserSpace CPU governor
+attempts to use the UserSpace CPU governor (a default value)
 .RE
-The default is OnDemand, Performance.
+The default is OnDemand, Performance and UserSpace.
 .TP
 \fBCryptoType\fR
 The cryptographic signature tool to be used in the creation of
@@ -597,34 +598,29 @@ including state, job ids and allocated nodes counter.
 Slurmctld triggers
 .RE
 
-.\ .TP
-.\ \fBDefCpusPerGPU\fR
-.\ Default count of CPUs allocated per allocated GPU.
-.\ 
+.TP
+\fBDefCpusPerGPU\fR
+Default count of CPUs allocated per allocated GPU.
+
 .TP
 \fBDefMemPerCPU\fR
 Default real memory size available per allocated CPU in megabytes.
 Used to avoid over\-subscribing memory and causing paging.
 \fBDefMemPerCPU\fR would generally be used if individual processors
-are allocated to jobs (\fBSelectType=select/cons_res\fR).
-.\ FIXME: REMOVE ONE LINE ABOVE
-.\ are allocated to jobs (\fBSelectType=select/cons_res\fR or
-.\ \fBSelectType=select/cons_tres\fR).
+are allocated to jobs (\fBSelectType=select/cons_res\fR or
+\fBSelectType=select/cons_tres\fR).
 The default value is 0 (unlimited).
-Also see \fBDefMemPerNode\fR and \fBMaxMemPerCPU\fR.
-\fBDefMemPerCPU\fR and \fBDefMemPerNode\fR are mutually exclusive.
-.\ FIXME: REMOVE TWO LINES ABOVE
-.\ Also see \fBDefMemPerGPU\fR, \fBDefMemPerNode\fR and \fBMaxMemPerCPU\fR.
-.\ \fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBDefMemPerNode\fR are
-.\ mutually exclusive.
+Also see \fBDefMemPerGPU\fR, \fBDefMemPerNode\fR and \fBMaxMemPerCPU\fR.
+\fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBDefMemPerNode\fR are
+mutually exclusive.
 
-.\ .TP
-.\ \fBDefMemPerGPU\fR
-.\ Default real memory size available per allocated GPU in megabytes.
-.\ The default value is 0 (unlimited).
-.\ Also see \fBDefMemPerCPU\fR and \fBDefMemPerNode\fR.
-.\ \fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBDefMemPerNode\fR are
-.\ mutually exclusive.
+.TP
+\fBDefMemPerGPU\fR
+Default real memory size available per allocated GPU in megabytes.
+The default value is 0 (unlimited).
+Also see \fBDefMemPerCPU\fR and \fBDefMemPerNode\fR.
+\fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBDefMemPerNode\fR are
+mutually exclusive.
 
 .TP
 \fBDefMemPerNode\fR
@@ -635,12 +631,9 @@ are allocated to jobs (\fBSelectType=select/linear\fR) and
 resources are over\-subscribed (\fBOverSubscribe=yes\fR or
 \fBOverSubscribe=force\fR).
 The default value is 0 (unlimited).
-Also see \fBDefMemPerCPU\fR and \fBMaxMemPerNode\fR.
-\fBDefMemPerCPU\fR and \fBDefMemPerNode\fR are mutually exclusive.
-.\ FIXME: REMOVE TWO LINES ABOVE
-.\ Also see \fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBMaxMemPerCPU\fR.
-.\ \fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBDefMemPerNode\fR are
-.\ mutually exclusive.
+Also see \fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBMaxMemPerCPU\fR.
+\fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBDefMemPerNode\fR are
+mutually exclusive.
 
 .TP
 \fBDefaultStorageHost\fR
@@ -802,12 +795,9 @@ Consider which value you want to be used for scheduling purposes.
 \fB0\fR
 Base scheduling decisions upon the actual configuration of each individual
 node except that the node's processor count in Slurm's configuration must
-match the actual hardware configuration if \fBPreemptMode=suspend,gang\fR
-or \fBSelectType=select/cons_res\fR are configured (both of those plugins
-.\ FIXME: REMOVE TWO LINES ABOVE
-.\ match the actual hardware configuration if \fBPreemptMode=suspend,gang\fR,
-.\ \fBSelectType=select/cons_res\fR or \fBSelectType=select/cons_tres\fR are
-.\ configured (all of those plugins
+match the actual hardware configuration if \fBPreemptMode=suspend,gang\fR,
+\fBSelectType=select/cons_res\fR or \fBSelectType=select/cons_tres\fR are
+configured (all of those plugins
 maintain resource allocation information using bitmaps for the cores in the
 system and must remain static, while the node's memory and disk space can
 be established later).
@@ -885,6 +875,39 @@ group membership lists will be cached.
 The time interval is given in seconds with a default value of 600 seconds.
 A value of zero will prevent periodic updating of group membership information.
 Also see the \fBGroupUpdateForce\fR parameter.
+
+.TP
+\fBGpuFreqDef\fR=[<\fItype\fR]=\fIvalue\fR>[,<\fItype\fR=\fIvalue\fR>]
+Default GPU frequency and voltage to use when running a job step if it
+has not been explicitly set using the \-\-gpu\-freq option.
+This option can be used to independently configure the GPU and its memory
+frequencies.
+In some cases, system power caps may override the requested values.
+The field \fItype\fR can be "memory" or "voltage".
+If \fItype\fR is not specified. the GPU frequency is implied.
+The \fIvalue\fR field can either be "low", "medium", "high", "highm1" or
+a numeric value (megahertz or volts).
+If the specified numeric value is not possible, a value as close as
+possible will be used.
+See below for definition of the values.
+Examples of use include "GpuFreqDef=medium,memory=high,voltage=high" and
+"GpuFreqDef=450".
+
+Supported \fIvalue\fR definitions:
+.RS
+.TP 10
+\fBlow\fR
+the lowest available frequency or voltage
+.TP
+\fBmedium\fR
+attempts to set a frequency  or voltage in the middle of the available range
+.TP
+\fBhigh\fR
+the highest available frequency or voltage
+.TP
+\fBhighm1\fR
+(high minus one) will select the next highest available frequency or voltage
+.RE
 
 .TP
 \fBHealthCheckInterval\fR
@@ -1261,11 +1284,10 @@ only take effect for newly launched jobs.
 Sort NUMA memory at step start. User can override this default with
 SLURM_MEM_BIND environment variable or \-\-mem\-bind=nosort command line option.
 .TP
-\fBsend_gids\fR
-Lookup and send the user_name and extended gids for a job within the slurmctld,
-rather than individual on each node as part of each task launch. Should
-avoid issues around name service scalability when launching jobs involving
-many nodes.
+\fBno_send_gids\fR
+By default the slurmctld will lookup and send the user_name and extended gids
+for a job, rather than individual on each node as part of each task launch. Which avoids issues around name service scalability when launching jobs involving
+many nodes.  Using this option will reverse this functionality.
 .TP 24
 \fBslurmstepd_memlock\fR
 Lock the slurmstepd process's current memory in RAM.
@@ -1380,14 +1402,10 @@ Also see \fBFirstJobId\fR.
 Maximum real memory size available per allocated CPU in megabytes.
 Used to avoid over\-subscribing memory and causing paging.
 \fBMaxMemPerCPU\fR would generally be used if individual processors
-are allocated to jobs (\fBSelectType=select/cons_res\fR).
-.\ FIXME: REMOVE ONE LINE ABOVE
-.\ are allocated to jobs (\fBSelectType=select/cons_res\fR or
-.\ \fBSelectType=select/cons_tres\fR).
+are allocated to jobs (\fBSelectType=select/cons_res\fR or
+\fBSelectType=select/cons_tres\fR).
 The default value is 0 (unlimited).
-Also see \fBDefMemPerCPU\fR and \fBMaxMemPerNode\fR.
-.\ FIXME: REMOVE ONE LINE ABOVE
-.\ Also see \fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBMaxMemPerNode\fR.
+Also see \fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBMaxMemPerNode\fR.
 \fBMaxMemPerCPU\fR and \fBMaxMemPerNode\fR are mutually exclusive.
 
 NOTE: If a job specifies a memory per CPU limit that exceeds this system limit,
@@ -1705,6 +1723,14 @@ enable gang scheduling independent of whether preemption is enabled
 specified in addition to a \fBPreemptMode\fR setting with the two
 options comma separated.  The \fBSUSPEND\fR option requires that gang
 scheduling be enabled (i.e, "PreemptMode=SUSPEND,GANG").
+\fBNOTE:
+For performance reasons, the backfill scheduler reserves whole nodes for jobs,
+not partial nodes. If during backfill scheduling a job preempts one or more
+other jbos, the whole nodes for those preempted jobs are reserved for the
+preemptor job, even if the preemptor job requested fewer resources than that.
+These reserved nodes aren't available to other jobs during that backfill
+cycle, even if the other jobs could fit on the nodes. Therefore, jobs may
+preempt more resources during a single backfill iteration than they requested.
 .RS
 .TP 12
 \fBOFF\fR
@@ -1757,9 +1783,7 @@ Job preemption rules are specified by Quality Of Service (QOS) specifications
 in the Slurm database.
 This option is not compatible with \fBPreemptMode=OFF\fR.
 A configuration of \fBPreemptMode=SUSPEND\fR is only supported by the
-\fBselect/cons_res\fR plugin.
-.\ FIXME: REMOVE ONE LINE ABOVE
-.\ \fBSelectType=select/cons_res\fR and \fBSelectType=select/cons_tres\fR plugins.
+\fBSelectType=select/cons_res\fR and \fBSelectType=select/cons_tres\fR plugins.
 .RE
 
 .TP
@@ -2091,7 +2115,8 @@ If set, the Alloc flag should also be set.  This will allow for salloc to not
 block until the prolog is finished on each node.  The blocking will happen when
 steps reach the slurmd and before any execution has happened in the step.
 This is a much faster way to work and if using srun to launch your tasks you
-should use this flag.
+should use this flag. This flag cannot be combined with the Contain or X11
+flags.
 .TP
 \fBSerial\fR
 By default, the Prolog and Epilog scripts run concurrently on each node.
@@ -2232,7 +2257,7 @@ See \fBPropagateResourceLimits\fR above for a list of valid limit names.
 Program to be executed on each compute node to reboot it. Invoked on each node
 once it becomes idle after the command "scontrol reboot_nodes" is executed by
 an authorized user or a job is submitted with the "\-\-reboot" option.
-After being rebooting, the node is returned to normal use.
+After rebooting, the node is returned to normal use.
 See \fBResumeTimeout\fR to configure the time you expect a reboot to finish in.
 
 .TP
@@ -2502,14 +2527,10 @@ nodes that are in use.
 This will tend to leave currently idle resources available for backfilling
 longer running jobs, but may result in allocations having less than optimal
 network topology.
-This option is currently only supported by the select/cons_res plugin
-(or select/cray with SelectTypeParameters set to "OTHER_CONS_RES",
-which layers the select/cray plugin over the select/cons_res plugin).
-.\ FIXME: REMOVE THREE LINES ABOVE
-.\ This option is currently only supported by the select/cons_res and
-.\ select/cons_tres plugins (or select/cray with SelectTypeParameters set to
-.\ "OTHER_CONS_RES" or "OTHER_CONS_TRES", which layers the select/cray plugin
-.\ over the select/cons_res or select/cons_tres plugin respectively).
+This option is currently only supported by the select/cons_res and
+select/cons_tres plugins (or select/cray with SelectTypeParameters set to
+"OTHER_CONS_RES" or "OTHER_CONS_TRES", which layers the select/cray plugin
+over the select/cons_res or select/cons_tres plugin respectively).
 .TP
 \fBbf_continue\fR
 The backfill scheduler periodically releases locks in order to permit other
@@ -2552,6 +2573,12 @@ expected times.
 This has no impact upon the number of tasks from a job array that can be
 started immediately, only those tasks expected to start at some future time.
 The default value is 20 tasks.
+NOTE:
+Jobs submitted to multiple partitions appear in the job queue once per
+partition. If different copies of a single job array record aren't consecutive
+in the job queue and another job array record is in between, then
+bf_max_job_array_resv tasks are considered per partition that the job is
+submitted to.
 .TP
 \fBbf_max_job_assoc=#\fR
 The maximum number of jobs per user association to attempt starting with the
@@ -2831,10 +2858,8 @@ fail instead of using the cached env.  This will also implicitly imply the
 requeue_setup_env_fail option as well.
 .TP
 \fBpack_serial_at_end\fR
-If used with the select/cons_res plugin then put serial jobs at the end of
-.\ FIXME: REMOVE ONE LINE ABOVE
-.\ If used with the select/cons_res or select/cons_tres plugin,
-.\ then put serial jobs at the end of
+If used with the select/cons_res or select/cons_tres plugin,
+then put serial jobs at the end of
 the available nodes rather than using a best fit algorithm.
 This may reduce resource fragmentation for some workloads.
 .TP
@@ -2852,20 +2877,16 @@ Also see the \fBbf_max_job_part\fR option.
 Specify how many attempts should be made in reording preemptable jobs to
 minimize the count of jobs preempted.
 The default value is 1. High values may adversely impact performance.
-The logic to support this option is only available in the select/cons_res plugin.
-.\ FIXME: REMOVE ONE LINE ABOVE
-.\ The logic to support this option is only available in the select/cons_res and
-.\ select/cons_tres plugins.
+The logic to support this option is only available in the select/cons_res and
+select/cons_tres plugins.
 .TP
 \fBpreempt_strict_order\fR
 If set, then execute extra logic in an attempt to preempt only the lowest
 priority jobs.
 It may be desirable to set this configuration parameter when there are multiple
 priorities of preemptable jobs.
-The logic to support this option is only available in the select/cons_res plugin.
-.\ FIXME: REMOVE ONE LINE ABOVE
-.\ The logic to support this option is only available in the select/cons_res and
-.\ select/cons_tres plugins.
+The logic to support this option is only available in the select/cons_res and
+select/cons_tres plugins.
 .TP
 \fBpreempt_youngest_first\fR
 If set, then the preemption sorting algorithm will be changed to sort by the
@@ -2948,9 +2969,12 @@ number of seconds.
 Also see \fBstep_retry_count\fR.
 The default value is 60 seconds.
 .TP
-\fBwhole_pack\fR
+\fBwhole_hetjob\fR
 Requests to cancel, hold or release any component of a heterogeneous job will
 be applied to all components of the job.
+
+NOTE: this option was previously named whole_pack and this is still supported
+for retrocompatibility.
 .RE
 
 .TP
@@ -3032,13 +3056,13 @@ for allocating resources to single CPU jobs only.
 Highly optimized for maximum throughput.
 NOTE: SPANK environment variables are NOT propagated to the job's \fBEpilog\fR
 program.
-.\ .TP
-.\ \fBselect/cons_tres\fR
-.\ The resources (cores, memory, GPUs and all other trackable resources) within
-.\ a node are individually allocated as consumable resources.
-.\ Note that whole nodes can be allocated to jobs for selected
-.\ partitions by using the \fIOverSubscribe=Exclusive\fR option.
-.\ See the partition \fBOverSubscribe\fR parameter for more information.
+.TP
+\fBselect/cons_tres\fR
+The resources (cores, memory, GPUs and all other trackable resources) within
+a node are individually allocated as consumable resources.
+Note that whole nodes can be allocated to jobs for selected
+partitions by using the \fIOverSubscribe=Exclusive\fR option.
+See the partition \fBOverSubscribe\fR parameter for more information.
 .RE
 
 .TP
@@ -3051,12 +3075,9 @@ The only supported options for \fBSelectType=select/linear\fR are
 prevents memory over subscription with job preemption or gang scheduling.
 By default \fBSelectType=select/linear\fR allocates whole nodes to jobs without
 considering their memory consumption.
-By default \fBSelectType=select/cons_res\fR, \fBSelectType=select/cray\fR, and
-\fBSelectType=select/serial\fR use \fBCR_CPU\fR, which allocates CPU (threads)
-.\ FIXME: REMOVE TWO LINES ABOVE
-.\ By default \fBSelectType=select/cons_res\fR, \fBSelectType=select/cray\fR,
-.\ \fBSelectType=select/serial\fR, and \fBSelectType=select/cons_tres\fR, use
-.\ \fBCR_CPU\fR, which allocates CPU (threads)
+By default \fBSelectType=select/cons_res\fR, \fBSelectType=select/cray\fR,
+\fBSelectType=select/serial\fR, and \fBSelectType=select/cons_tres\fR, use
+\fBCR_CPU\fR, which allocates CPU (threads)
 to jobs without considering their memory consumption.
 .RS
 .TP
@@ -3067,11 +3088,11 @@ The following options are supported for \fBSelectType=select/cray\fR:
 Layer the select/cons_res plugin under the select/cray plugin, the default is
 to layer on select/linear.  This also allows all the options available for
 \fBSelectType=select/cons_res\fR.
-.\ .TP
-.\ \fBOTHER_CONS_TRES\fR
-.\ Layer the select/cons_tres plugin under the select/cray plugin, the default is
-.\ to layer on select/linear.  This also allows all the options available for
-.\ \fBSelectType=select/cons_tres\fR.
+.TP
+\fBOTHER_CONS_TRES\fR
+Layer the select/cons_tres plugin under the select/cray plugin, the default is
+to layer on select/linear.  This also allows all the options available for
+\fBSelectType=select/cons_tres\fR.
 .TP
 \fBNHC_ABSOLUTELY_NO\fR
 Never run the node health check. Implies NHC_NO and NHC_NO_STEPS as well.
@@ -3086,10 +3107,8 @@ after each allocation.  This also sets NHC_NO_STEPS, so the NHC will never run
 except when nodes have been left with unkillable steps.
 .RE
 .TP
-The following options are supported by the \fBSelectType=select/cons_res\fR plugin:
-.\ FIXME: REMOVE ONE LINE ABOVE
-.\ The following options are supported by the \fBSelectType=select/cons_res\fR
-.\ and \fBSelectType=select/cons_tres\fR plugins:
+The following options are supported by the \fBSelectType=select/cons_res\fR
+and \fBSelectType=select/cons_tres\fR plugins:
 .RS
 .TP
 \fBCR_CPU\fR
@@ -3195,6 +3214,16 @@ For security purposes, a user other than "root" is recommended.
 This user must exist on all nodes of the cluster for authentication
 of communications between Slurm components.
 The default value is "root".
+
+.TP
+\fBSlurmdParameters\fR
+Parameters specific to the Slurmd.
+Multiple options may be comma separated.
+.RS
+.TP
+\fBshutdown_on_reboot\fR
+If set, the Slurmd will shut itself down when a reboot request is received.
+.RE
 
 .TP
 \fBSlurmdUser\fR
@@ -3339,14 +3368,12 @@ See also the related "SlurmctldPrimaryOffProg" parameter.
 .TP
 \fBSlurmctldSyslogDebug\fR
 The slurmctld daemon will log events to the syslog file at the specified
-level of detail (the \fBSlurmctldLogFile\fR file will include log messages
-at the level of details specified by the \fBSlurmctldDebug\fR configuration
-parameter). If the slurmctld daemon is run in the foreground (started with the
-\fB\-D\fR command line option) the \fBSlurmctldSyslogDebug\fR configuration
-parameter will be ignored.
-The default value is \fBquiet\fR unless there is no configured
-\fBSlurmctldLogFile\fR, in which case the default value will be \fBfatal\fR so
-that fatal errors are logged somewhere.
+level of detail. If not set, the slurmctld daemon will log to syslog at
+level \fBfatal\fR, unless there is no \fBSlurmctldLogFile\fR and it is running
+in the background, in which case it will log to syslog at the level specified
+by \fBSlurmctldDebug\fR (at \fBfatal\fR in the case that \fBSlurmctldDebug\fR
+is set to \fBquiet\fR) or it is run in the foreground, when it will be set to
+quiet.
 
 .RS
 .TP 10
@@ -3477,14 +3504,12 @@ Any "%n" within the name is replaced with the Slurm node name on which the
 .TP
 \fBSlurmdSyslogDebug\fR
 The slurmd daemon will log events to the syslog file at the specified
-level of detail (the \fBSlurmdLogFile\fR file will include log messages
-at the level of details specified by the \fBSlurmdDebug\fR configuration
-parameter). If the slurmd daemon is run in the foreground (started with the
-\fB\-D\fR command line option) the \fBSlurmdSyslogDebug\fR configuration
-parameter will be ignored.
-The default value is \fBquiet\fR unless there is no configured
-\fBSlurmdLogFile\fR, in which case the default value will be \fBfatal\fR so
-that fatal errors are logged somewhere.
+level of detail. If not set, the slurmd daemon will log to syslog at
+level \fBfatal\fR, unless there is no \fBSlurmdLogFile\fR and it is running
+in the background, in which case it will log to syslog at the level specified
+by \fBSlurmdDebug\fR  (at \fBfatal\fR in the case that \fBSlurmdDebug\fR
+is set to \fBquiet\fR) or it is run in the foreground, when it will be set to
+quiet.
 
 .RS
 .TP 10
@@ -4030,6 +4055,15 @@ May not exceed 65533 seconds.
 .TP
 \fBX11Parameters\fR
 For use with Slurm's built-in X11 forwarding implementation.
+.RS
+.TP 8
+\fBlocal_xauthority\fR
+If set, xauth data on the compute node will be placed in a temporary file
+(under \fBTmpFS\fR) rather than in \fB~/.Xauthority\fR, and the
+\fBXAUTHORITY\fR environment variable will be injected into the job's
+environment (as well as any process captured by pam_slurm_adopt).
+This can help avoid file locking contention on the user's home directory.
+.RE
 
 .LP
 The configuration of nodes (or machines) to be managed by Slurm is
@@ -4382,10 +4416,8 @@ plus \fBCPUs\fR; do not configure \fBSockets\fR, \fBCoresPerSocket\fR or
 A job can execute a one task per thread from within one job step or
 execute a distinct job step on each of the threads.
 Note also if you are running with more than 1 thread per core and running
-the select/cons_res plugin you will want to set the SelectTypeParameters
-.\ FIXME: REMOVE ONE LINE ABOVE
-.\ the select/cons_res or select/cons_tres plugin then you will want to set
-.\ the SelectTypeParameters
+the select/cons_res or select/cons_tres plugin then you will want to set
+the SelectTypeParameters
 variable to something other than CR_CPU to avoid unexpected results.
 The default value is 1.
 
@@ -4703,34 +4735,29 @@ specification will utilize this partition.
 Possible values are "YES" and "NO".
 The default value is "NO".
 
-.\ .TP
-.\ \fBDefCpusPerGPU\fR
-.\ Default count of CPUs allocated per allocated GPU.
-.\ 
+.TP
+\fBDefCpusPerGPU\fR
+Default count of CPUs allocated per allocated GPU.
+
 .TP
 \fBDefMemPerCPU\fR
 Default real memory size available per allocated CPU in megabytes.
 Used to avoid over\-subscribing memory and causing paging.
 \fBDefMemPerCPU\fR would generally be used if individual processors
-are allocated to jobs (\fBSelectType=select/cons_res\fR).
-.\ FIXME: REMOVE ONE LINE ABOVE
-.\ are allocated to jobs (\fBSelectType=select/cons_res\fR or
-.\ \fBSelectType=select/cons_tres\fR).
+are allocated to jobs (\fBSelectType=select/cons_res\fR or
+\fBSelectType=select/cons_tres\fR).
 If not set, the \fBDefMemPerCPU\fR value for the entire cluster will be used.
-Also see \fBDefMemPerNode\fR and \fBMaxMemPerCPU\fR.
-\fBDefMemPerCPU\fR and \fBDefMemPerNode\fR are mutually exclusive.
-.\ FIXME: REMOVE TWO LINES ABOVE
-.\ Also see \fBDefMemPerGPU\fR, \fBDefMemPerNode\fR and \fBMaxMemPerCPU\fR.
-.\ \fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBDefMemPerNode\fR are mutually
-.\ exclusive.
+Also see \fBDefMemPerGPU\fR, \fBDefMemPerNode\fR and \fBMaxMemPerCPU\fR.
+\fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBDefMemPerNode\fR are mutually
+exclusive.
 
-.\ .TP
-.\ \fBDefMemPerGPU\fR
-.\ Default real memory size available per allocated GPU in megabytes.
-.\ Also see \fBDefMemPerCPU\fR, \fBDefMemPerNode\fR and \fBMaxMemPerCPU\fR.
-.\ \fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBDefMemPerNode\fR are mutually
-.\ exclusive.
-.\ 
+.TP
+\fBDefMemPerGPU\fR
+Default real memory size available per allocated GPU in megabytes.
+Also see \fBDefMemPerCPU\fR, \fBDefMemPerNode\fR and \fBMaxMemPerCPU\fR.
+\fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBDefMemPerNode\fR are mutually
+exclusive.
+
 .TP
 \fBDefMemPerNode\fR
 Default real memory size available per allocated node in megabytes.
@@ -4740,12 +4767,9 @@ are allocated to jobs (\fBSelectType=select/linear\fR) and
 resources are over\-subscribed (\fBOverSubscribe=yes\fR or
 \fBOverSubscribe=force\fR).
 If not set, the \fBDefMemPerNode\fR value for the entire cluster will be used.
-Also see \fBDefMemPerCPU\fR and \fBMaxMemPerNode\fR.
-\fBDefMemPerCPU\fR and \fBDefMemPerNode\fR are mutually exclusive.
-.\ FIXME: REMOVE TWO LINES ABOVE
-.\ Also see \fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBMaxMemPerCPU\fR.
-.\ \fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBDefMemPerNode\fR are mutually
-.\ exclusive.
+Also see \fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBMaxMemPerCPU\fR.
+\fBDefMemPerCPU\fR, \fBDefMemPerGPU\fR and \fBDefMemPerNode\fR are mutually
+exclusive.
 
 .TP
 \fBDenyAccounts\fR
@@ -4830,10 +4854,8 @@ partition/queue.
 Maximum real memory size available per allocated CPU in megabytes.
 Used to avoid over\-subscribing memory and causing paging.
 \fBMaxMemPerCPU\fR would generally be used if individual processors
-are allocated to jobs (\fBSelectType=select/cons_res\fR).
-.\ FIXME: REMOVE ONE LINE ABOVE
-.\ are allocated to jobs (\fBSelectType=select/cons_res\fR or
-.\ \fBSelectType=select/cons_tres\fR).
+are allocated to jobs (\fBSelectType=select/cons_res\fR or
+\fBSelectType=select/cons_tres\fR).
 If not set, the \fBMaxMemPerCPU\fR value for the entire cluster will be used.
 Also see \fBDefMemPerCPU\fR and \fBMaxMemPerNode\fR.
 \fBMaxMemPerCPU\fR and \fBMaxMemPerNode\fR are mutually exclusive.
@@ -4912,10 +4934,8 @@ For more information see the following web pages:
 .RS
 .TP 12
 \fBEXCLUSIVE\fR
-Allocates entire nodes to jobs even with \fBSelectType=select/cons_res\fR configured.
-.\ FIXME: REMOVE ONE LINE ABOVE
-.\ Allocates entire nodes to jobs even with \fBSelectType=select/cons_res\fR or
-.\ \fBSelectType=select/cons_tres\fR configured.
+Allocates entire nodes to jobs even with \fBSelectType=select/cons_res\fR or
+\fBSelectType=select/cons_tres\fR configured.
 Jobs that run in partitions with "OverSubscribe=EXCLUSIVE" will have
 exclusive access to all allocated nodes.
 .TP
@@ -4933,9 +4953,7 @@ on the partition if started due to job preemption. For example, a configuration
 of \fIOverSubscribe=FORCE:1\fR will only permit one job per resources normally,
 but a second job can be started if done so through preemption based upon QOS.
 The use of \fIPreemptType=QOS\fR and \fIPreemptType=Suspend\fR only applies
-with \fBSelectType=select/cons_res\fR.
-.\ FIXME: REMOVE ONE LINE ABOVE
-.\ with \fBSelectType=select/cons_res\fR or \fBSelectType=select/cons_tres\fR.
+with \fBSelectType=select/cons_res\fR or \fBSelectType=select/cons_tres\fR.
 .TP
 \fBYES\fR
 Makes all resources in the partition available for sharing upon request by

@@ -81,6 +81,9 @@
  * sockets_per_node	- Count of sockets on this node, build by
  *			  build_job_resources() and ensures consistent
  *			  interpretation of core_bitmap
+ * tasks_per_node	- Expected tasks to launch per node. Currently used only
+ *			  by cons_tres for tres_per_task support at resource
+ *			  allocation time. No need to save/restore or pack.
  * whole_node		- Job allocated full node (used only by select/cons_res)
  *
  * NOTES:
@@ -118,6 +121,7 @@ struct job_resources {
 	uint32_t  ncpus;
 	uint32_t *sock_core_rep_count;
 	uint16_t *sockets_per_node;
+	uint16_t *tasks_per_node;
 	uint8_t   whole_node;
 };
 
@@ -191,8 +195,7 @@ extern job_resources_t *copy_job_resources(job_resources_t *job_resrcs_ptr);
 extern void free_job_resources(job_resources_t **job_resrcs_pptr);
 
 /* Log the contents of a job_resources data structure using info() */
-extern void log_job_resources(uint32_t job_id,
-			      job_resources_t *job_resrcs_ptr);
+extern void log_job_resources(void *job_ptr);
 
 /* Un/pack full job_resources data structure */
 extern void pack_job_resources(job_resources_t *job_resrcs_ptr, Buf buffer,
@@ -204,7 +207,7 @@ extern int unpack_job_resources(job_resources_t **job_resrcs_pptr,
  * This is needed after a restart/reconfiguration since nodes can
  * be added or removed from the system resulting in changing in
  * the bitmap size or bit positions */
-extern int reset_node_bitmap(job_resources_t *job_resrcs_ptr, uint32_t job_id);
+extern int reset_node_bitmap(void *job_ptr);
 
 /* For a given node_id, socket_id and core_id, get it's offset within
  * the core bitmap */
@@ -274,6 +277,10 @@ extern bitstr_t * copy_job_resources_node(job_resources_t *job_resrcs_ptr,
 extern int get_job_resources_cnt(job_resources_t *job_resrcs_ptr,
 				 uint32_t node_id, uint16_t *socket_cnt,
 				 uint16_t *cores_per_socket_cnt);
+
+/* Get CPU count for a specific node_id (zero origin), return -1 on error */
+extern int get_job_resources_cpus(job_resources_t *job_resrcs_ptr,
+				  uint32_t node_id);
 
 /*
  * Test if job can fit into the given full-length core_bitmap

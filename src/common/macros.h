@@ -215,6 +215,54 @@
 		}							\
 	} while (0)
 
+#define slurm_rwlock_init(rwlock)					\
+	do {								\
+		int err = pthread_rwlock_init(rwlock, NULL);		\
+		if (err) {						\
+			fatal("%s:%d %s: pthread_rwlock_init(): %m",	\
+			      __FILE__, __LINE__, __func__);		\
+		}							\
+	} while (0)
+
+#define slurm_rwlock_destroy(rwlock)					\
+	do {								\
+		int err = pthread_rwlock_destroy(rwlock);		\
+		if (err) {						\
+			fatal("%s:%d %s: pthread_rwlock_destroy(): %m",	\
+			      __FILE__, __LINE__, __func__);		\
+		}							\
+	} while (0)
+
+#define slurm_rwlock_rdlock(rwlock)					\
+	do {								\
+		int err = pthread_rwlock_rdlock(rwlock);		\
+		if (err) {						\
+			fatal("%s:%d %s: pthread_rwlock_rdlock(): %m",	\
+			      __FILE__, __LINE__, __func__);		\
+		}							\
+	} while (0)
+
+#define slurm_rwlock_wrlock(rwlock)					\
+	do {								\
+		int err = pthread_rwlock_wrlock(rwlock);		\
+		if (err) {						\
+			fatal("%s:%d %s: pthread_rwlock_wrlock(): %m",	\
+			      __FILE__, __LINE__, __func__);		\
+		}							\
+	} while (0)
+
+#define slurm_rwlock_unlock(rwlock)					\
+	do {								\
+		int err = pthread_rwlock_unlock(rwlock);		\
+		if (err) {						\
+			fatal("%s:%d %s: pthread_rwlock_unlock(): %m",	\
+			      __FILE__, __LINE__, __func__);		\
+		}							\
+	} while (0)
+
+#define slurm_rwlock_trywrlock(rwlock) pthread_rwlock_trywrlock(rwlock)
+#define slurm_rwlock_tryrdlock(rwlock) pthread_rwlock_tryrdlock(rwlock)
+
 #ifdef PTHREAD_SCOPE_SYSTEM
 #  define slurm_attr_init(attr)						\
 	do {								\

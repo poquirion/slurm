@@ -239,7 +239,7 @@ static char *_get_default_account(uint32_t user_id)
 	memset(&user, 0, sizeof(slurmdb_user_rec_t));
 	user.uid = user_id;
 	if (assoc_mgr_fill_in_user(acct_db_conn, &user, accounting_enforce,
-				   NULL) != SLURM_ERROR) {
+				   NULL, false) != SLURM_ERROR) {
 		return user.default_acct;
 	} else {
 		return NULL;
@@ -1518,6 +1518,8 @@ static void _register_lua_slurm_output_functions (void)
 	/*
 	 * job_desc bitflags
 	 */
+	lua_pushnumber (L, GRES_DISABLE_BIND);
+	lua_setfield (L, -2, "GRES_DISABLE_BIND");
 	lua_pushnumber (L, GRES_ENFORCE_BIND);
 	lua_setfield (L, -2, "GRES_ENFORCE_BIND");
 	lua_pushnumber (L, KILL_INV_DEP);

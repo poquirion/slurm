@@ -44,6 +44,7 @@
 
 #define XCGROUP_ERROR    1
 #define XCGROUP_SUCCESS  0
+#define MAX_MOVE_WAIT 5000
 
 // http://lists.debian.org/debian-boot/2012/04/msg00047.html
 #if defined(__FreeBSD__) || defined(__NetBSD__)
@@ -77,8 +78,7 @@ typedef struct xcgroup {
  *  - XCGROUP_ERROR
  *  - XCGROUP_SUCCESS
  */
-int xcgroup_ns_create(slurm_cgroup_conf_t *conf,
-		      xcgroup_ns_t* cgns, char* mnt_args,
+int xcgroup_ns_create(xcgroup_ns_t* cgns, char* mnt_args,
 		      char* subsys);
 
 /*
@@ -133,7 +133,7 @@ int xcgroup_ns_find_by_pid(xcgroup_ns_t* cgns, xcgroup_t* cg, pid_t pid);
  *  - XCGROUP_ERROR
  *  - XCGROUP_SUCCESS
  */
-int xcgroup_ns_load(slurm_cgroup_conf_t *conf, xcgroup_ns_t *cgns, char *subsys);
+int xcgroup_ns_load(xcgroup_ns_t *cgns, char *subsys);
 
 /*
  * create a cgroup structure
@@ -316,5 +316,12 @@ int xcgroup_get_uint64_param(xcgroup_t* cg, char* param, uint64_t* value);
  *   - XCGROUP_SUCCESS
  */
 int xcgroup_move_process(xcgroup_t *cg, pid_t pid);
+
+/*
+ * Wait for a pid to move out of a cgroup.
+ *
+ * Must call xcgroup_move_process before this function.
+ */
+int xcgroup_wait_pid_moved(xcgroup_t *cg, const char *cg_name);
 
 #endif

@@ -78,6 +78,7 @@ typedef cpuset_t cpu_set_t;
 #include "src/common/assoc_mgr.h"
 #include "src/common/bitstring.h"
 #include "src/common/gres.h"
+#include "src/common/job_resources.h"
 #include "src/common/list.h"
 #include "src/common/log.h"
 #include "src/common/macros.h"
@@ -91,7 +92,6 @@ typedef cpuset_t cpu_set_t;
 #include "src/common/xmalloc.h"
 #include "src/common/xstring.h"
 
-#define _DEBUG 0
 #define MAX_GRES_BITMAP 1024
 
 strong_alias(gres_gresid_to_gresname, slurm_gres_gresid_to_gresname);
@@ -115,7 +115,9 @@ typedef struct slurm_gres_ops {
 	void		(*job_set_env)		( char ***job_env_ptr,
 						  void *gres_ptr, int node_inx );
 	void		(*step_set_env)		( char ***job_env_ptr,
-						  void *gres_ptr );
+						  void *gres_ptr,
+						  char *tres_freq,
+						  int local_proc_id );
 	void		(*step_reset_env)	( char ***job_env_ptr,
 						  void *gres_ptr,
 						  bitstr_t *usable_gres );
@@ -180,19 +182,29 @@ static bool init_run = false;
 static gres_node_state_t *
 		_build_gres_node_state(void);
 static uint32_t	_build_id(char *name);
+static uint32_t **_build_tasks_per_node_sock(struct job_resources *job_res,
+					    uint8_t overcommit,
+					    gres_mc_data_t *tres_mc_ptr,
+					    struct node_record *node_table_ptr);
 static bitstr_t *_core_bitmap_rebuild(bitstr_t *old_core_bitmap, int new_size);
 static void	_destroy_gres_slurmd_conf(void *x);
+static int	_find_job_by_sock_gres(void *x, void *key);
+static int	_find_sock_by_job_gres(void *x, void *key);
+static void	_free_tasks_per_node_sock(uint32_t **tasks_per_node_socket,
+					  int node_cnt);
 static void	_get_gres_cnt(gres_node_state_t *gres_data, char *orig_config,
 			      char *gres_name, char *gres_name_colon,
 			      int gres_name_colon_len);
+static uint32_t	_get_task_cnt_node(uint32_t **tasks_per_node_socket,
+				   int node_inx, int sock_cnt);
 static uint64_t	_get_tot_gres_cnt(uint32_t plugin_id, uint64_t *set_cnt);
 static int	_gres_find_id(void *x, void *key);
 static int	_gres_find_job_by_key(void *x, void *key);
 static int	_gres_find_step_by_key(void *x, void *key);
 static void	_gres_job_list_delete(void *list_element);
 static int	_job_alloc(void *job_gres_data, void *node_gres_data,
-			   int node_cnt, int node_offset, char *gres_name,
-			   uint32_t job_id, char *node_name,
+			   int node_cnt, int node_index, int node_offset,
+			   char *gres_name, uint32_t job_id, char *node_name,
 			   bitstr_t *core_bitmap);
 static void	_job_core_filter(void *job_gres_data, void *node_gres_data,
 				 bool use_total_gres, bitstr_t *core_bitmap,
@@ -200,7 +212,7 @@ static void	_job_core_filter(void *job_gres_data, void *node_gres_data,
 				 char *gres_name, char *node_name);
 static int	_job_dealloc(void *job_gres_data, void *node_gres_data,
 			     int node_offset, char *gres_name, uint32_t job_id,
-			     char *node_name);
+			     char *node_name, bool old_job);
 static void	_job_state_delete(void *gres_data);
 static void *	_job_state_dup(void *gres_data);
 static void *	_job_state_dup2(void *gres_data, int node_index);
@@ -235,6 +247,11 @@ static int	_parse_gres_config2(void **dest, slurm_parser_enum_t type,
 static void	_set_gres_cnt(char *orig_config, char **new_config,
 			      uint64_t new_cnt, char *gres_name,
 			      char *gres_name_colon, int gres_name_colon_len);
+static void	_set_gres_socks(char *orig_config, char **new_config,
+				bitstr_t *tot_core_bitmap, int core_cnt,
+				int sock_cnt, char *gres_name,
+				char *gres_name_colon, int gres_name_colon_len);
+static void	_sock_gres_del(void *x);
 static int	_step_alloc(void *step_gres_data, void *job_gres_data,
 			    int node_offset, char *gres_name,
 			    uint32_t job_id, uint32_t step_id);
@@ -487,12 +504,12 @@ extern int gres_plugin_init(void)
 	while (one_name) {
 		full_name = xstrdup("gres/");
 		xstrcat(full_name, one_name);
-		for (i=0; i<gres_context_cnt; i++) {
+		for (i = 0; i < gres_context_cnt; i++) {
 			if (!xstrcmp(full_name, gres_context[i].gres_type))
 				break;
 		}
 		xfree(full_name);
-		if (i<gres_context_cnt) {
+		if (i < gres_context_cnt) {
 			error("Duplicate plugin %s ignored",
 			      gres_context[i].gres_type);
 		} else {
@@ -515,7 +532,7 @@ extern int gres_plugin_init(void)
 
 	/* Ensure that plugin_id is valid and unique */
 	for (i=0; i<gres_context_cnt; i++) {
-		for (j=i+1; j<gres_context_cnt; j++) {
+		for (j = i+1; j < gres_context_cnt; j++) {
 			if (gres_context[i].plugin_id !=
 			    gres_context[j].plugin_id)
 				continue;
@@ -866,7 +883,7 @@ static int _parse_gres_config(void **dest, slurm_parser_enum_t type,
 	p = xmalloc(sizeof(gres_slurmd_conf_t));
 	if (!value) {
 		if (!s_p_get_string(&p->name, "Name", tbl)) {
-			error("Invalid gres data, no type name (%s)", line);
+			error("Invalid GRES data, no type name (%s)", line);
 			xfree(p);
 			s_p_hashtbl_destroy(tbl);
 			return 0;
@@ -879,20 +896,28 @@ static int _parse_gres_config(void **dest, slurm_parser_enum_t type,
 	if (s_p_get_string(&p->cpus, "Cores", tbl) ||
 	    s_p_get_string(&p->cpus, "CPUs", tbl)) {
 		char *local_cpus = NULL;
-		p->cpus_bitmap = bit_alloc(gres_cpu_cnt);
 		if (xcpuinfo_ops.xcpuinfo_abs_to_mac) {
 			i = (xcpuinfo_ops.xcpuinfo_abs_to_mac)
 				(p->cpus, &local_cpus);
+			/*
+			 * Only executed by slurmstepd and we don't want
+			 * fatal here. Ignore bad Core/CPU configuration.
+			 */
 			if (i != SLURM_SUCCESS) {
-				fatal("Invalid gres data for %s, Cores=%s",
+				error("Invalid GRES data for %s, Cores=%s",
 				      p->name, p->cpus);
 			}
-		} else
+		} else {
 			local_cpus = xstrdup(p->cpus);
-		if ((bit_size(p->cpus_bitmap) == 0) ||
-		    bit_unfmt(p->cpus_bitmap, local_cpus) != 0) {
-			fatal("Invalid gres data for %s, Cores=%s (only %u Cores are available)",
-			      p->name, p->cpus, gres_cpu_cnt);
+			i = SLURM_SUCCESS;
+		}
+		if (i == SLURM_SUCCESS) {
+			p->cpus_bitmap = bit_alloc(gres_cpu_cnt);
+			if ((bit_size(p->cpus_bitmap) == 0) ||
+			    bit_unfmt(p->cpus_bitmap, local_cpus) != 0) {
+				fatal("Invalid GRES data for %s, Cores=%s (only %u Cores are available)",
+				      p->name, p->cpus, gres_cpu_cnt);
+			}
 		}
 		xfree(local_cpus);
 	}
@@ -1122,7 +1147,7 @@ extern int gres_plugin_node_config_load(uint32_t cpu_cnt, char *node_name,
 	s_p_hashtbl_destroy(tbl);
 	list_for_each(gres_conf_list, _log_gres_slurmd_conf, NULL);
 
-	for (i=0; ((i < gres_context_cnt) && (rc == SLURM_SUCCESS)); i++) {
+	for (i = 0; ((i < gres_context_cnt) && (rc == SLURM_SUCCESS)); i++) {
 		_validate_config(&gres_context[i]);
 		if (gres_context[i].ops.node_config_load == NULL)
 			continue;	/* No plugin */
@@ -1454,6 +1479,14 @@ static void _get_gres_cnt(gres_node_state_t *gres_data, char *orig_config,
 				error("Bad GRES configuration: %s", tok);
 				break;
 			}
+
+			/*
+			 * If we have a GRES that has a type but not a count we
+			 * will have 0 here, so set it correctly.
+			 */
+			if (!tmp_gres_cnt)
+				tmp_gres_cnt = 1;
+
 			gres_config_cnt += tmp_gres_cnt;
 			num[0] = '\0';
 
@@ -1507,7 +1540,7 @@ static void _set_gres_cnt(char *orig_config, char **new_config,
 			  char *gres_name_colon, int gres_name_colon_len)
 {
 	char *new_configured_res = NULL, *node_gres_config;
-	char *last_tok = NULL, *tok;
+	char *last_tok = NULL, *tok, *sep, *add_info, *sock_info = NULL;
 
 	if (*new_config)
 		node_gres_config = xstrdup(*new_config);
@@ -1520,24 +1553,87 @@ static void _set_gres_cnt(char *orig_config, char **new_config,
 	while (tok) {
 		if (new_configured_res)
 			xstrcat(new_configured_res, ",");
+		if ((sep = strchr(tok, '('))) {
+			sock_info = xstrdup(sep);
+			add_info = sock_info;
+			sep[0] = '\0';
+		} else
+			add_info = "";	
 		if (xstrcmp(tok, gres_name) &&
 		    xstrncmp(tok, gres_name_colon, gres_name_colon_len)) {
 			xstrcat(new_configured_res, tok);
 		} else if ((new_cnt % (1024 * 1024 * 1024)) == 0) {
 			new_cnt /= (1024 * 1024 * 1024);
-			xstrfmtcat(new_configured_res, "%s:%"PRIu64"G",
-				   gres_name, new_cnt);
+			xstrfmtcat(new_configured_res, "%s:%"PRIu64"G%s",
+				   gres_name, new_cnt, add_info);
 		} else if ((new_cnt % (1024 * 1024)) == 0) {
 			new_cnt /= (1024 * 1024);
-			xstrfmtcat(new_configured_res, "%s:%"PRIu64"M",
-				   gres_name, new_cnt);
+			xstrfmtcat(new_configured_res, "%s:%"PRIu64"M%s",
+				   gres_name, new_cnt, add_info);
 		} else if ((new_cnt % 1024) == 0) {
 			new_cnt /= 1024;
-			xstrfmtcat(new_configured_res, "%s:%"PRIu64"K",
-				   gres_name, new_cnt);
+			xstrfmtcat(new_configured_res, "%s:%"PRIu64"K%s",
+				   gres_name, new_cnt, add_info);
 		} else {
-			xstrfmtcat(new_configured_res, "%s:%"PRIu64"",
-				   gres_name, new_cnt);
+			xstrfmtcat(new_configured_res, "%s:%"PRIu64"%s",
+				   gres_name, new_cnt, add_info);
+		}
+		xfree(sock_info);
+		tok = strtok_r(NULL, ",", &last_tok);
+	}
+	xfree(node_gres_config);
+	xfree(*new_config);
+	*new_config = new_configured_res;
+}
+
+static void _set_gres_socks(char *orig_config, char **new_config,
+			    bitstr_t *tot_core_bitmap,
+			    int core_cnt, int sock_cnt, char *gres_name,
+			    char *gres_name_colon, int gres_name_colon_len)
+{
+	char *new_configured_res = NULL, *node_gres_config;
+	char *last_tok = NULL, *sep, *tok, sock_str[32];
+	bitstr_t *sock_bitmap;
+	int cores_per_sock, c, s, i;
+
+	xassert(sock_cnt);
+	xassert(tot_core_bitmap);
+	if (*new_config)
+		node_gres_config = xstrdup(*new_config);
+	else if (orig_config)
+		node_gres_config = xstrdup(orig_config);
+	else
+		return;
+
+	cores_per_sock = core_cnt / sock_cnt;
+	tok = strtok_r(node_gres_config, ",", &last_tok);
+	while (tok) {
+		if (new_configured_res)
+			xstrcat(new_configured_res, ",");
+		if (xstrcmp(tok, gres_name) &&
+		    xstrncmp(tok, gres_name_colon, gres_name_colon_len)) {
+			xstrcat(new_configured_res, tok);
+		} else {
+			sock_bitmap = bit_alloc(sock_cnt);
+			for (s = 0; s < sock_cnt; s++) {
+				for (c = 0; c < cores_per_sock; c++) {
+					i = s * cores_per_sock + c;
+					if (!bit_test(tot_core_bitmap, i))
+						continue;
+					bit_set(sock_bitmap, s);
+					break;
+				}
+			}
+			bit_fmt(sock_str, sizeof(sock_str), sock_bitmap);
+			for (i = 0; i < sizeof(sock_str) && sock_str[i]; i++) {
+				if (sock_str[i] == ',')
+					sock_str[i] = ';';
+			}
+			if ((sep = strchr(tok, '(')))
+				sep[0] = '\0';
+			xstrfmtcat(new_configured_res, "%s(S:%s)", tok,
+				   sock_str);
+			bit_free(sock_bitmap);
 		}
 		tok = strtok_r(NULL, ",", &last_tok);
 	}
@@ -1735,6 +1831,7 @@ static bitstr_t *_links_str2bitmap(char *links, char *node_name)
 
 static int _node_config_validate(char *node_name, char *orig_config,
 				 char **new_config, gres_state_t *gres_ptr,
+				 int cpu_cnt, int core_cnt, int sock_cnt,
 				 uint16_t fast_schedule, char **reason_down,
 				 slurm_gres_context_t *context_ptr)
 {
@@ -1744,7 +1841,9 @@ static int _node_config_validate(char *node_name, char *orig_config,
 	gres_node_state_t *gres_data;
 	ListIterator iter;
 	gres_slurmd_conf_t *gres_slurmd_conf;
+	bitstr_t *tot_core_bitmap = NULL;
 
+	xassert(core_cnt);
 	if (gres_ptr->gres_data == NULL)
 		gres_ptr->gres_data = _build_gres_node_state();
 	gres_data = (gres_node_state_t *) gres_ptr->gres_data;
@@ -1848,13 +1947,52 @@ static int _node_config_validate(char *node_name, char *orig_config,
 			if (gres_slurmd_conf->plugin_id !=
 			    context_ptr->plugin_id)
 				continue;
+			if (gres_data->gres_bit_alloc)
+				gres_data->topo_gres_cnt_alloc[i] = 0;
 			gres_data->topo_gres_cnt_avail[i] =
 					gres_slurmd_conf->count;
 			if (gres_slurmd_conf->cpus) {
-				gres_data->topo_core_bitmap[i] =
+				bitstr_t *tmp_bitmap;
+				tmp_bitmap =
 					bit_alloc(gres_slurmd_conf->cpu_cnt);
-				bit_unfmt(gres_data->topo_core_bitmap[i],
-					  gres_slurmd_conf->cpus);
+				bit_unfmt(tmp_bitmap, gres_slurmd_conf->cpus);
+				if (gres_slurmd_conf->cpu_cnt == core_cnt) {
+					if (!tot_core_bitmap) {
+						tot_core_bitmap =
+							bit_alloc(core_cnt);
+					}
+					gres_data->topo_core_bitmap[i] =
+						tmp_bitmap;
+					bit_or(tot_core_bitmap, tmp_bitmap);
+					tmp_bitmap = NULL; /* Nothing to free */
+				} else if (gres_slurmd_conf->cpu_cnt ==
+					   cpu_cnt) {
+					/* Translate CPU to core bitmap */
+					int cpus_per_core = cpu_cnt / core_cnt;
+					int j, core_inx;
+					if (!tot_core_bitmap) {
+						tot_core_bitmap =
+							bit_alloc(core_cnt);
+					}
+					gres_data->topo_core_bitmap[i] =
+						bit_alloc(core_cnt);
+					for (j = 0; j < cpu_cnt; j++) {
+						if (!bit_test(tmp_bitmap, j))
+							continue;
+						core_inx = j / cpus_per_core;
+						bit_set(gres_data->
+							topo_core_bitmap[i],
+							core_inx);
+					}
+					bit_or(tot_core_bitmap,
+					       gres_data->topo_core_bitmap[i]);
+				} else if (i == 0) {
+					error("%s: invalid GRES cpu count (%u) on node %s",
+					      context_ptr->gres_type,
+					      gres_slurmd_conf->cpu_cnt,
+					      node_name);
+				}
+				FREE_NULL_BITMAP(tmp_bitmap);
 				cpus_config = true;
 			} else if (cpus_config) {
 				error("%s: has CPUs configured for only"
@@ -1868,7 +2006,14 @@ static int _node_config_validate(char *node_name, char *orig_config,
 			gres_data->topo_gres_bitmap[i] = bit_alloc(gres_cnt);
 			for (j = 0; j < gres_slurmd_conf->count; j++) {
 				bit_set(gres_data->topo_gres_bitmap[i],
-					gres_inx++);
+					gres_inx);
+				if (gres_data->gres_bit_alloc &&
+				    bit_test(gres_data->gres_bit_alloc,
+					     gres_inx)) {
+					/* Set by recovered job */
+					gres_data->topo_gres_cnt_alloc[i]++;
+				}
+				gres_inx++;
 			}
 			gres_data->topo_type_id[i] =
 				_build_id(gres_slurmd_conf->type_name);
@@ -1958,6 +2103,7 @@ static int _node_config_validate(char *node_name, char *orig_config,
 			xfree(gres_data->topo_gres_cnt_avail);
 			xfree(gres_data->topo_type_id);
 			xfree(gres_data->topo_type_name);
+			FREE_NULL_BITMAP(tot_core_bitmap);
 		}
 		gres_data->topo_cnt = 0;
 	} else if ((fast_schedule == 0) &&
@@ -1968,6 +2114,13 @@ static int _node_config_validate(char *node_name, char *orig_config,
 			      context_ptr->gres_name,
 			      context_ptr->gres_name_colon,
 			      context_ptr->gres_name_colon_len);
+	}
+	if (tot_core_bitmap) {
+		_set_gres_socks(orig_config, new_config, tot_core_bitmap,
+				core_cnt, sock_cnt, context_ptr->gres_name,
+				context_ptr->gres_name_colon,
+				context_ptr->gres_name_colon_len);
+		bit_free(tot_core_bitmap);
 	}
 
 	return rc;
@@ -1980,6 +2133,9 @@ static int _node_config_validate(char *node_name, char *orig_config,
  * IN orig_config - Gres information supplied from slurm.conf
  * IN/OUT new_config - Updated gres info from slurm.conf if FastSchedule=0
  * IN/OUT gres_list - List of Gres records for this node to track usage
+ * IN cpu_cnt - Count of CPUs (threads) on this node
+ * IN core_cnt - Count of cores on this node
+ * IN sock_cnt - Count of sockets on this node
  * IN fast_schedule - 0: Validate and use actual hardware configuration
  *		      1: Validate hardware config, but use slurm.conf config
  *		      2: Don't validate hardware, use slurm.conf configuration
@@ -1989,6 +2145,8 @@ extern int gres_plugin_node_config_validate(char *node_name,
 					    char *orig_config,
 					    char **new_config,
 					    List *gres_list,
+					    int cpu_cnt, int core_cnt,
+					    int sock_cnt,
 					    uint16_t fast_schedule,
 					    char **reason_down)
 {
@@ -2015,8 +2173,9 @@ extern int gres_plugin_node_config_validate(char *node_name,
 			list_append(*gres_list, gres_ptr);
 		}
 		rc2 = _node_config_validate(node_name, orig_config, new_config,
-					    gres_ptr, fast_schedule,
-					    reason_down, &gres_context[i]);
+					    gres_ptr, cpu_cnt, core_cnt,
+					    sock_cnt, fast_schedule, reason_down,
+					    &gres_context[i]);
 		rc = MAX(rc, rc2);
 	}
 	slurm_mutex_unlock(&gres_context_lock);
@@ -2742,7 +2901,7 @@ extern void gres_plugin_node_state_log(List gres_list, char *node_name)
 	slurm_mutex_lock(&gres_context_lock);
 	gres_iter = list_iterator_create(gres_list);
 	while ((gres_ptr = (gres_state_t *) list_next(gres_iter))) {
-		for (i = 0; i<gres_context_cnt; i++) {
+		for (i = 0; i < gres_context_cnt; i++) {
 			if (gres_ptr->plugin_id !=
 			    gres_context[i].plugin_id)
 				continue;
@@ -2920,6 +3079,12 @@ static void _job_state_delete(void *gres_data)
 	xfree(gres_ptr->gres_cnt_node_alloc);
 	xfree(gres_ptr->gres_bit_step_alloc);
 	xfree(gres_ptr->gres_cnt_step_alloc);
+	if (gres_ptr->gres_bit_select) {
+		for (i = 0; i < gres_ptr->total_node_cnt; i++)
+			FREE_NULL_BITMAP(gres_ptr->gres_bit_select[i]);
+	}
+	xfree(gres_ptr->gres_cnt_node_alloc);
+	xfree(gres_ptr->gres_cnt_node_select);
 	xfree(gres_ptr->gres_name);
 	xfree(gres_ptr->type_name);
 	xfree(gres_ptr);
@@ -2989,24 +3154,161 @@ static int _clear_mem_per_gres(void *x, void *arg)
 }
 
 /*
- * Insure tres_per_job >= tres_per_node >= tres_per_socket
+ * Insure consistency of gres_per_* options
+ * Modify task and node count as needed for consistentcy with GRES options
  * RET -1 on failure, 0 on success
  */
-static int _test_gres_cnt(void *x)
+static int _test_gres_cnt(gres_job_state_t *job_gres_data,
+			  uint32_t *num_tasks,
+			  uint32_t *min_nodes, uint32_t *max_nodes,
+			  uint16_t *ntasks_per_node,
+			  uint16_t *ntasks_per_socket,
+			  uint16_t *sockets_per_node,
+			  uint16_t *cpus_per_task)
 {
-	gres_job_state_t *job_gres_data = (gres_job_state_t *) x;
+	int req_nodes, req_tasks, req_tasks_per_node, req_tasks_per_socket;
+	int req_sockets, req_cpus_per_task;
+	uint16_t cpus_per_gres;
 
+	/* Insure gres_per_job >= gres_per_node >= gres_per_socket */
 	if (job_gres_data->gres_per_job &&
 	    ((job_gres_data->gres_per_node &&
 	      (job_gres_data->gres_per_node > job_gres_data->gres_per_job)) ||
+	     (job_gres_data->gres_per_task &&
+	      (job_gres_data->gres_per_task > job_gres_data->gres_per_job)) ||
 	     (job_gres_data->gres_per_socket &&
 	      (job_gres_data->gres_per_socket > job_gres_data->gres_per_job))))
 		return -1;
 
+	/* Insure gres_per_job >= gres_per_task */
 	if (job_gres_data->gres_per_node &&
-	    (job_gres_data->gres_per_socket &&
-	     (job_gres_data->gres_per_socket > job_gres_data->gres_per_node)))
+	    ((job_gres_data->gres_per_task &&
+	      (job_gres_data->gres_per_task > job_gres_data->gres_per_node)) ||
+	     (job_gres_data->gres_per_socket &&
+	      (job_gres_data->gres_per_socket > job_gres_data->gres_per_node))))
 		return -1;
+
+	/* gres_per_socket requires sockets-per-node count specification */
+	if (job_gres_data->gres_per_socket) {
+		if (*sockets_per_node == NO_VAL16)
+			return -1;
+	}
+
+	/* gres_per_task requires task count specification */
+	if (job_gres_data->gres_per_task) {
+		if (*num_tasks == NO_VAL)
+			return -1;
+	}
+
+	/*
+	 * Insure gres_per_job is multiple of gres_per_node
+	 * Insure node count is consistent with GRES parameters
+	 */
+	if (job_gres_data->gres_per_job && job_gres_data->gres_per_node) {
+		if (job_gres_data->gres_per_job % job_gres_data->gres_per_node){
+			/* gres_per_job not multiple of gres_per_node */
+			return -1;
+		}
+		req_nodes = job_gres_data->gres_per_job /
+			    job_gres_data->gres_per_node;
+		if ((req_nodes < *min_nodes) || (req_nodes > *max_nodes))
+			return -1;
+		*min_nodes = *max_nodes = req_nodes;
+	}
+
+	/*
+	 * Insure gres_per_node is multiple of gres_per_socket
+	 * Insure task count is consistent with GRES parameters
+	 */
+	if (job_gres_data->gres_per_node && job_gres_data->gres_per_socket) {
+		if (job_gres_data->gres_per_node %
+		    job_gres_data->gres_per_socket) {
+			/* gres_per_node not multiple of gres_per_socket */
+			return -1;
+		}
+		req_sockets = job_gres_data->gres_per_node /
+			      job_gres_data->gres_per_socket;
+		if (*sockets_per_node == NO_VAL16)
+			*sockets_per_node = req_sockets;
+		else if (*sockets_per_node != req_sockets)
+			return -1;
+	}
+	/*
+	 * Insure gres_per_job is multiple of gres_per_task
+	 * Insure task count is consistent with GRES parameters
+	 */
+	if (job_gres_data->gres_per_job && job_gres_data->gres_per_task) {
+		if (job_gres_data->gres_per_job % job_gres_data->gres_per_task){
+			/* gres_per_job not multiple of gres_per_task */
+			return -1;
+		}
+		req_tasks = job_gres_data->gres_per_job /
+			    job_gres_data->gres_per_task;
+		if (*num_tasks == NO_VAL)
+			*num_tasks = req_tasks;
+		else if (*num_tasks != req_tasks)
+			return -1;
+	}
+
+	/*
+	 * Insure gres_per_node is multiple of gres_per_task
+	 * Insure tasks_per_node is consistent with GRES parameters
+	 */
+	if (job_gres_data->gres_per_node && job_gres_data->gres_per_task) {
+		if (job_gres_data->gres_per_node %
+		    job_gres_data->gres_per_task) {
+			/* gres_per_node not multiple of gres_per_task */
+			return -1;
+		}
+		req_tasks_per_node = job_gres_data->gres_per_node /
+				     job_gres_data->gres_per_task;
+		if ((*ntasks_per_node == NO_VAL16) ||
+		    (*ntasks_per_node == 0))
+			*ntasks_per_node = req_tasks_per_node;
+		else if (*ntasks_per_node != req_tasks_per_node)
+			return -1;
+	}
+
+	/*
+	 * Insure gres_per_socket is multiple of gres_per_task
+	 * Insure ntasks_per_socket is consistent with GRES parameters
+	 */
+	if (job_gres_data->gres_per_socket && job_gres_data->gres_per_task) {
+		if (job_gres_data->gres_per_socket %
+		    job_gres_data->gres_per_task) {
+			/* gres_per_socket not multiple of gres_per_task */
+			return -1;
+		}
+		req_tasks_per_socket = job_gres_data->gres_per_socket /
+				       job_gres_data->gres_per_task;
+		if ((*ntasks_per_socket == NO_VAL16) ||
+		    (*ntasks_per_socket == 0))
+			*ntasks_per_socket = req_tasks_per_socket;
+		else if (*ntasks_per_socket != req_tasks_per_socket)
+			return -1;
+	}
+
+	/* Insure that cpus_per_gres * gres_per_task == cpus_per_task */
+	if (job_gres_data->cpus_per_gres)
+		cpus_per_gres = job_gres_data->cpus_per_gres;
+	else
+		cpus_per_gres = job_gres_data->def_cpus_per_gres;
+	if (cpus_per_gres && job_gres_data->gres_per_task) {
+		req_cpus_per_task = cpus_per_gres *job_gres_data->gres_per_task;
+		if ((*cpus_per_task == NO_VAL16) ||
+		    (*cpus_per_task == 0))
+			*cpus_per_task = req_cpus_per_task;
+		else if (*cpus_per_task != req_cpus_per_task)
+			return -1;
+	}
+
+	/* Insure tres_per_job >= node count */
+	if (job_gres_data->gres_per_job) {
+		if (job_gres_data->gres_per_job < *min_nodes)
+			return -1;
+		if (job_gres_data->gres_per_job < *max_nodes)
+			*max_nodes = job_gres_data->gres_per_job;
+	}
 
 	return 0;
 }
@@ -3107,8 +3409,7 @@ next:	if (prev_save_ptr[0] == '\0') {	/* Empty input token */
 			offset = sep2 - type + 1;
 			sep += offset;
 		} else {
-			my_rc = ESLURM_INVALID_GRES;
-			goto fini;
+			sep = NULL;
 		}
 	} else {
 		/* Count in this field, no type */
@@ -3207,14 +3508,25 @@ static bool _generic_job_state(gres_job_state_t *job_state)
 }
 
 /*
- * Given a job's requested gres configuration, validate it and build a gres list
+ * Given a job's requested GRES configuration, validate it and build a GRES list
  * Note: This function can be used for a new request with gres_list==NULL or
  *	 used to update an existing job, in which case gres_list is a copy
  *	 of the job's original value (so we can clear fields as needed)
  * IN *tres* - job requested gres input string
- * IN num_tasks - requested task count
- * IN min_nodes - requested minimum node count
- * IN max_nodes - requested maximum node count
+ * IN/OUT num_tasks - requested task count, may be reset to provide
+ *		      consistent gres_per_node/task values
+ * IN/OUT min_nodes - requested minimum node count, may be reset to provide
+ *		      consistent gres_per_node/task values
+ * IN/OUT max_nodes - requested maximum node count, may be reset to provide
+ *		      consistent gres_per_node/task values
+ * IN/OUT ntasks_per_node - requested tasks_per_node count, may be reset to
+ *		      provide consistent gres_per_node/task values
+ * IN/OUT ntasks_per_socket - requested ntasks_per_socket count, may be reset to
+ *		      provide consistent gres_per_node/task values
+ * IN/OUT sockets_per_node - requested sockets_per_node count, may be reset to
+ *		      provide consistent gres_per_socket/node values
+ * IN/OUT cpus_per_task - requested ntasks_per_socket count, may be reset to
+ *		      provide consistent gres_per_task/cpus_per_gres values
  * OUT gres_list - List of GRES records for this job to track usage
  * RET SLURM_SUCCESS or ESLURM_INVALID_GRES
  */
@@ -3224,9 +3536,13 @@ extern int gres_plugin_job_state_validate(char *cpus_per_tres,
 					  char *tres_per_socket,
 					  char *tres_per_task,
 					  char *mem_per_tres,
-					  uint32_t num_tasks,
-					  uint32_t min_nodes,
-					  uint32_t max_nodes,
+					  uint32_t *num_tasks,
+					  uint32_t *min_nodes,
+					  uint32_t *max_nodes,
+					  uint16_t *ntasks_per_node,
+					  uint16_t *ntasks_per_socket,
+					  uint16_t *sockets_per_node,
+					  uint16_t *cpus_per_task,
 					  List *gres_list)
 {
 	typedef struct overlap_check {
@@ -3365,7 +3681,10 @@ extern int gres_plugin_job_state_validate(char *cpus_per_tres,
 	iter = list_iterator_create(*gres_list);
 	while ((gres_state = (gres_state_t *) list_next(iter))) {
 		job_gres_data = (gres_job_state_t *) gres_state->gres_data;
-		if (_test_gres_cnt(job_gres_data) != 0) {
+		if (_test_gres_cnt(job_gres_data, num_tasks, min_nodes,
+				   max_nodes, ntasks_per_node,
+				   ntasks_per_socket, sockets_per_node,
+				   cpus_per_task) != 0) {
 			rc = ESLURM_INVALID_GRES;
 			break;
 		}
@@ -3438,6 +3757,316 @@ extern int gres_plugin_job_state_validate(char *cpus_per_tres,
 	xfree(over_list);
 
 	return rc;
+}
+
+/*
+ * Find a sock_gres_t record in a list by matching the plugin_id and type_id
+ *	from a gres_state_t job record
+ * IN x - a sock_gres_t record to test
+ * IN key - the gres_state_t record (from a job) we want to match
+ * RET 1 on match, otherwise 0
+ */
+static int _find_sock_by_job_gres(void *x, void *key)
+{
+	sock_gres_t *sock_data = (sock_gres_t *) x;
+	gres_state_t *job_gres_state = (gres_state_t *) key;
+	gres_job_state_t *job_data;
+
+	job_data = (gres_job_state_t *) job_gres_state->gres_data;
+	if ((sock_data->plugin_id == job_gres_state->plugin_id) &&
+	    (sock_data->type_id   == job_data->type_id))
+		return 1;
+	return 0;
+}
+
+/*
+ * Find a gres_state_t job record in a list by matching the plugin_id and
+ *	type_id from a sock_gres_t record
+ * IN x - a gres_state_t record (from a job) to test
+ * IN key - the sock_gres_t record we want to match
+ * RET 1 on match, otherwise 0
+ */
+static int _find_job_by_sock_gres(void *x, void *key)
+{
+	gres_state_t *job_gres_state = (gres_state_t *) x;
+	gres_job_state_t *job_data;
+	sock_gres_t *sock_data = (sock_gres_t *) key;
+
+	job_data = (gres_job_state_t *) job_gres_state->gres_data;
+	if ((sock_data->plugin_id == job_gres_state->plugin_id) &&
+	    (sock_data->type_id   == job_data->type_id))
+		return 1;
+	return 0;
+}
+
+/*
+ * Clear GRES allocation info for all job GRES at start of scheduling cycle
+ * Return TRUE if any gres_per_job constraints to satisfy
+ */
+extern bool gres_plugin_job_sched_init(List job_gres_list)
+{
+	ListIterator iter;
+	gres_state_t *job_gres_state;
+	gres_job_state_t *job_data;
+	bool rc = false;
+
+	if (!job_gres_list)
+		return rc;
+
+	iter = list_iterator_create(job_gres_list);
+	while ((job_gres_state = (gres_state_t *) list_next(iter))) {
+		job_data = (gres_job_state_t *) job_gres_state->gres_data;
+		if (!job_data->gres_per_job)
+			continue;
+		job_data->total_gres = 0;
+		rc = true;
+	}
+	list_iterator_destroy(iter);
+
+	return rc;
+}
+
+/*
+ * Return TRUE if all gres_per_job specifications are satisfied
+ */
+extern bool gres_plugin_job_sched_test(List job_gres_list, uint32_t job_id)
+{
+	ListIterator iter;
+	gres_state_t *job_gres_state;
+	gres_job_state_t *job_data;
+	bool rc = true;
+
+	if (!job_gres_list)
+		return rc;
+
+	iter = list_iterator_create(job_gres_list);
+	while ((job_gres_state = (gres_state_t *) list_next(iter))) {
+		job_data = (gres_job_state_t *) job_gres_state->gres_data;
+		if (job_data->gres_per_job &&
+		    (job_data->gres_per_job > job_data->total_gres)) {
+			rc = false;
+			break;
+		}
+	}
+	list_iterator_destroy(iter);
+
+	return rc;
+}
+
+/*
+ * Return TRUE if all gres_per_job specifications will be satisfied with
+ *	the addtitional resources provided by a single node
+ * IN job_gres_list - List of job's GRES requirements (job_gres_state_t)
+ * IN sock_gres_list - Per socket GRES availability on this node (sock_gres_t)
+ * IN job_id - The job being tested
+ */
+extern bool gres_plugin_job_sched_test2(List job_gres_list, List sock_gres_list,
+					uint32_t job_id)
+{
+	ListIterator iter;
+	gres_state_t *job_gres_state;
+	gres_job_state_t *job_data;
+	sock_gres_t *sock_data;
+	bool rc = true;
+
+	if (!job_gres_list)
+		return rc;
+
+	iter = list_iterator_create(job_gres_list);
+	while ((job_gres_state = (gres_state_t *) list_next(iter))) {
+		job_data = (gres_job_state_t *) job_gres_state->gres_data;
+		if ((job_data->gres_per_job == 0) ||
+		    (job_data->gres_per_job < job_data->total_gres))
+			continue;
+		sock_data = list_find_first(sock_gres_list,
+					    _find_sock_by_job_gres,
+					    job_gres_state);
+		if (!sock_data ||
+		    (job_data->gres_per_job >
+		     (job_data->total_gres + sock_data->total_cnt))) {
+			rc = false;
+			break;
+		}
+	}
+	list_iterator_destroy(iter);
+
+	return rc;
+}
+
+/*
+ * Update a job's total_gres counter as we add a node to potential allocaiton
+ * IN job_gres_list - List of job's GRES requirements (job_gres_state_t)
+ * IN sock_gres_list - Per socket GRES availability on this node (sock_gres_t)
+ */
+extern void gres_plugin_job_sched_add(List job_gres_list, List sock_gres_list)
+{
+	ListIterator iter;
+	gres_state_t *job_gres_state;
+	gres_job_state_t *job_data;
+	sock_gres_t *sock_data;
+
+	if (!job_gres_list)
+		return;
+
+	iter = list_iterator_create(job_gres_list);
+	while ((job_gres_state = (gres_state_t *) list_next(iter))) {
+		job_data = (gres_job_state_t *) job_gres_state->gres_data;
+		if (!job_data->gres_per_job)	/* Don't care about totals */
+			continue;
+		sock_data = list_find_first(sock_gres_list,
+					    _find_sock_by_job_gres,
+					    job_gres_state);
+		if (!sock_data)		/* None of this GRES available */
+			continue;
+		job_data->total_gres += sock_data->total_cnt;
+	}
+	list_iterator_destroy(iter);
+}
+
+/*
+ * Create/update List GRES that can be made available on the specified node
+ * IN/OUT consec_gres - List of sock_gres_t that can be made available on
+ *			a set of nodes
+ * IN job_gres_list - List of job's GRES requirements (gres_job_state_t)
+ * IN sock_gres_list - Per socket GRES availability on this node (sock_gres_t)
+ */
+extern void gres_plugin_job_sched_consec(List *consec_gres, List job_gres_list,
+					 List sock_gres_list)
+{
+	ListIterator iter;
+	gres_state_t *job_gres_state;
+	gres_job_state_t *job_data;
+	sock_gres_t *sock_data, *consec_data;
+
+	if (!job_gres_list)
+		return;
+
+	iter = list_iterator_create(job_gres_list);
+	while ((job_gres_state = (gres_state_t *) list_next(iter))) {
+		job_data = (gres_job_state_t *) job_gres_state->gres_data;
+		if (!job_data->gres_per_job)	/* Don't care about totals */
+			continue;
+		sock_data = list_find_first(sock_gres_list,
+					    _find_sock_by_job_gres,
+					    job_gres_state);
+		if (!sock_data)		/* None of this GRES available */
+			continue;
+		if (*consec_gres == NULL)
+			*consec_gres = list_create(_sock_gres_del);
+		consec_data = list_find_first(*consec_gres,
+					      _find_sock_by_job_gres,
+					      job_gres_state);
+		if (!consec_data) {
+			consec_data = xmalloc(sizeof(sock_gres_t));
+			consec_data->plugin_id = sock_data->plugin_id;
+			consec_data->type_id   = sock_data->type_id;
+			list_append(*consec_gres, consec_data);
+		}
+		consec_data->total_cnt += sock_data->total_cnt;
+	}
+	list_iterator_destroy(iter);
+}
+
+/*
+ * Determine if the additional sock_gres_list resources will result in
+ * satisfying the job's gres_per_job constraints
+ * IN job_gres_list - job's GRES requirements
+ * IN sock_gres_list - available GRES in a set of nodes, data structure built
+ *		       by gres_plugin_job_sched_consec()
+ */
+extern bool gres_plugin_job_sched_sufficient(List job_gres_list,
+					     List sock_gres_list)
+{
+	ListIterator iter;
+	gres_state_t *job_gres_state;
+	gres_job_state_t *job_data;
+	sock_gres_t *sock_data;
+	bool rc = true;
+
+	if (!job_gres_list)
+		return true;
+
+	iter = list_iterator_create(job_gres_list);
+	while ((job_gres_state = (gres_state_t *) list_next(iter))) {
+		job_data = (gres_job_state_t *) job_gres_state->gres_data;
+		if (!job_data->gres_per_job)	/* Don't care about totals */
+			continue;
+		if (job_data->total_gres >= job_data->gres_per_job)
+			continue;
+		sock_data = list_find_first(sock_gres_list,
+					    _find_sock_by_job_gres,
+					    job_gres_state);
+		if (!sock_data)	{	/* None of this GRES available */
+			rc = false;
+			break;
+		}
+		if ((job_data->total_gres + sock_data->total_cnt) <
+		    job_data->gres_per_job) {
+			rc = false;
+			break;
+		}
+	}
+	list_iterator_destroy(iter);
+
+	return rc;
+}
+
+/*
+ * Given a List of sock_gres_t entries, return a string identifying the
+ * count of each GRES available on this set of nodes
+ * IN sock_gres_list - count of GRES available in this group of nodes
+ * IN job_gres_list - job GRES specification, used only to get GRES name/type
+ * RET xfree the returned string
+ */
+extern char *gres_plugin_job_sched_str(List sock_gres_list, List job_gres_list)
+{
+	ListIterator iter;
+	sock_gres_t *sock_data;
+	gres_state_t *job_gres_state;
+	gres_job_state_t *job_data;
+	char *out_str = NULL, *sep;
+
+	if (!sock_gres_list)
+		return NULL;
+
+	iter = list_iterator_create(sock_gres_list);
+	while ((sock_data = (sock_gres_t *) list_next(iter))) {
+		job_gres_state = list_find_first(job_gres_list,
+					   _find_job_by_sock_gres, sock_data);
+		if (!job_gres_state) {	/* Should never happen */
+			error("%s: Could not find job GRES for type %u:%u",
+			      __func__, sock_data->plugin_id,
+			      sock_data->type_id);
+			continue;
+		}
+		job_data = (gres_job_state_t *) job_gres_state->gres_data;
+		if (out_str)
+			sep = ",";
+		else
+			sep = "GRES:";
+		if (job_data->type_name) {
+			xstrfmtcat(out_str, "%s%s:%s:%"PRIu64, sep,
+				   job_data->gres_name, job_data->type_name,
+				   sock_data->total_cnt);
+		} else {
+			xstrfmtcat(out_str, "%s%s:%"PRIu64, sep,
+				   job_data->gres_name, sock_data->total_cnt);
+		}
+	}
+	list_iterator_destroy(iter);
+
+	return out_str;
+}
+
+/*
+ * Create a (partial) copy of a job's gres state for job binding
+ * IN gres_list - List of Gres records for this job to track usage
+ * RET The copy or NULL on failure
+ * NOTE: Only job details are copied, NOT the job step details
+ */
+extern List gres_plugin_job_state_dup(List gres_list)
+{
+	return gres_plugin_job_state_extract(gres_list, -1);
 }
 
 /* Copy gres_job_state_t record for ALL nodes */
@@ -3520,23 +4149,12 @@ static void *_job_state_dup2(void *gres_data, int node_index)
 }
 
 /*
- * Create a (partial) copy of a job's gres state for job binding
- * IN gres_list - List of Gres records for this job to track usage
- * RET The copy or NULL on failure
- * NOTE: Only job details are copied, NOT the job step details
- */
-List gres_plugin_job_state_dup(List gres_list)
-{
-	return gres_plugin_job_state_extract(gres_list, -1);
-}
-
-/*
  * Create a (partial) copy of a job's gres state for a particular node index
  * IN gres_list - List of Gres records for this job to track usage
  * IN node_index - zero-origin index to the node
  * RET The copy or NULL on failure
  */
-List gres_plugin_job_state_extract(List gres_list, int node_index)
+extern List gres_plugin_job_state_extract(List gres_list, int node_index)
 {
 	ListIterator gres_iter;
 	gres_state_t *gres_ptr, *new_gres_state;
@@ -3773,9 +4391,6 @@ extern int gres_plugin_job_state_unpack(List *gres_list, Buf buffer,
 
 			safe_unpack8(&has_more, buffer);
 			if (has_more) {
-				gres_job_ptr->gres_cnt_node_alloc =
-					xmalloc(sizeof(uint64_t) *
-						gres_job_ptr->node_cnt);
 				safe_unpack64_array(
 					&gres_job_ptr->gres_cnt_node_alloc,
 					&utmp32, buffer);
@@ -4399,7 +5014,14 @@ extern uint32_t gres_plugin_job_test(List job_gres_list, List node_gres_list,
 static void _sock_gres_del(void *x)
 {
 	sock_gres_t *sock_gres = (sock_gres_t *) x;
+	int s;
+
 	if (sock_gres) {
+		if (sock_gres->bits_by_sock) {
+			for (s = 0; s < sock_gres->sock_cnt; s++)
+				FREE_NULL_BITMAP(sock_gres->bits_by_sock[s]);
+			xfree(sock_gres->bits_by_sock);
+		}
 		xfree(sock_gres->cnt_by_sock);
 		xfree(sock_gres->gres_name);
 		/* NOTE: sock_gres->job_specs is just a pointer, do not free */
@@ -4471,14 +5093,18 @@ static sock_gres_t *_build_sock_gres_by_topo(gres_job_state_t *job_gres_ptr,
 				bool use_total_gres, bitstr_t *core_bitmap,
 				uint16_t sockets, uint16_t cores_per_sock,
 				uint32_t job_id, char *node_name,
-				bool enforce_binding, uint32_t s_p_n)
+				bool enforce_binding, uint32_t s_p_n,
+				bitstr_t **req_sock_map)
 {
 	int i, j, s, c, tot_cores;
 	sock_gres_t *sock_gres;
+	int64_t add_gres;
 	uint64_t avail_gres, min_gres = 1;
 	bool match = false;
 
 	sock_gres = xmalloc(sizeof(sock_gres_t));
+	sock_gres->sock_cnt = sockets;
+	sock_gres->bits_by_sock = xmalloc(sizeof(bitstr_t *) * sockets);
 	sock_gres->cnt_by_sock = xmalloc(sizeof(uint64_t) * sockets);
 	for (i = 0; i < node_gres_ptr->topo_cnt; i++) {
 		if (job_gres_ptr->type_name &&
@@ -4535,6 +5161,14 @@ static sock_gres_t *_build_sock_gres_by_topo(gres_job_state_t *job_gres_ptr,
 				    !bit_test(node_gres_ptr->topo_core_bitmap[i],
 					      j))
 					continue;
+				if (!sock_gres->bits_by_sock[s]) {
+					sock_gres->bits_by_sock[s] =
+						bit_copy(node_gres_ptr->
+							 topo_gres_bitmap[i]);
+				} else {
+					bit_or(sock_gres->bits_by_sock[s],
+					       node_gres_ptr->topo_gres_bitmap[i]);
+				}
 				sock_gres->cnt_by_sock[s] += avail_gres;
 				sock_gres->total_cnt += avail_gres;
 				avail_gres = 0;
@@ -4591,7 +5225,7 @@ static sock_gres_t *_build_sock_gres_by_topo(gres_job_state_t *job_gres_ptr,
 				if (!bit_test(core_bitmap, i))
 					continue;
 				avail_sock++;
-				avail_sock_flag[s] = true;	
+				avail_sock_flag[s] = true;
 				break;
 			}
 		}
@@ -4615,15 +5249,6 @@ static sock_gres_t *_build_sock_gres_by_topo(gres_job_state_t *job_gres_ptr,
 			avail_sock--;
 		}
 		xfree(avail_sock_flag);
-	}  else if (match && enforce_binding && core_bitmap) {
-		/* Clear core bitmap on sockets without GRES */
-		for (s = 0; s < sockets; s++) {
-			if (sock_gres->cnt_by_sock[s] == 0) {
-				i = s * cores_per_sock;
-				bit_nclear(core_bitmap, i,
-					   i + cores_per_sock - 1);
-			}
-		}
 	}
 
 	if (match) {
@@ -4633,6 +5258,59 @@ static sock_gres_t *_build_sock_gres_by_topo(gres_job_state_t *job_gres_ptr,
 			min_gres = MAX(min_gres, job_gres_ptr->gres_per_task);
 		if (sock_gres->total_cnt < min_gres)
 			match = false;
+	}
+
+
+	/*
+	 * If sockets-per-node (s_p_n) not specified then identify sockets
+	 * which are required to satisfy gres_per_node or task specification
+	 * so that allocated tasks can be distributed over multiple sockets
+	 * if necessary.
+	 */
+	add_gres = min_gres - sock_gres->cnt_any_sock;
+	if (match && core_bitmap && (s_p_n == NO_VAL) && (add_gres > 0) &&
+	    job_gres_ptr->gres_per_node) {
+		int avail_sock = 0, best_sock_inx = -1;
+		bool *avail_sock_flag = xmalloc(sizeof(bool) * sockets);
+		for (s = 0; s < sockets; s++) {
+			if (sock_gres->cnt_by_sock[s] == 0)
+				continue;
+			for (c = 0; c < cores_per_sock; c++) {
+				i = (s * cores_per_sock) + c;
+				if (!bit_test(core_bitmap, i))
+					continue;
+				avail_sock++;
+				avail_sock_flag[s] = true;
+				if ((best_sock_inx == -1) ||
+				    (sock_gres->cnt_by_sock[s] >
+				     sock_gres->cnt_by_sock[best_sock_inx])) {
+					best_sock_inx = s;
+				}
+				break;
+			}
+		}
+		while ((best_sock_inx != -1) && (add_gres > 0)) {
+			if (*req_sock_map == NULL)
+				*req_sock_map = bit_alloc(sockets);
+			bit_set(*req_sock_map, best_sock_inx);
+			add_gres -= sock_gres->cnt_by_sock[best_sock_inx];
+			avail_sock_flag[best_sock_inx] = false;
+			if (add_gres <= 0)
+				break;
+			/* Find next best socket */
+			best_sock_inx = -1;
+			for (s = 0; s < sockets; s++) {
+				if ((sock_gres->cnt_by_sock[s] == 0) ||
+				    !avail_sock_flag[s])
+					continue;
+				if ((best_sock_inx == -1) ||
+				    (sock_gres->cnt_by_sock[s] >
+				     sock_gres->cnt_by_sock[best_sock_inx])) {
+					best_sock_inx = s;
+				}
+			}
+		}
+		xfree(avail_sock_flag);
 	}
 
 	if (match) {
@@ -4684,6 +5362,7 @@ static sock_gres_t *_build_sock_gres_by_type(gres_job_state_t *job_gres_ptr,
 		}
 		if (avail_gres < min_gres)
 			continue;	/* Insufficient GRES remaining */
+		sock_gres->cnt_any_sock += avail_gres;
 		sock_gres->total_cnt += avail_gres;
 		match = true;
 	}
@@ -4730,6 +5409,7 @@ static sock_gres_t *_build_sock_gres_basic(gres_job_state_t *job_gres_ptr,
 		return NULL;	/* Insufficient GRES remaining */
 
 	sock_gres = xmalloc(sizeof(sock_gres_t));
+	sock_gres->cnt_any_sock += avail_gres;
 	sock_gres->total_cnt += avail_gres;
 
 	return sock_gres;
@@ -4748,6 +5428,7 @@ static sock_gres_t *_build_sock_gres_basic(gres_job_state_t *job_gres_ptr,
  * IN node_name       - name of the node (for logging)
  * IN enforce_binding - if true then only use GRES with direct access to cores
  * IN s_p_n           - Expected sockets_per_node (NO_VAL if not limited)
+ * OUT req_sock_map   - bitmap of specific requires sockets
  * RET: List of sock_gres_t entries identifying what resources are available on
  *	each core. Returns NULL if none available. Call FREE_NULL_LIST() to
  *	release memory.
@@ -4756,7 +5437,8 @@ extern List gres_plugin_job_test2(List job_gres_list, List node_gres_list,
 				  bool use_total_gres, bitstr_t *core_bitmap,
 				  uint16_t sockets, uint16_t cores_per_sock,
 				  uint32_t job_id, char *node_name,
-				  bool enforce_binding, uint32_t s_p_n)
+				  bool enforce_binding, uint32_t s_p_n,
+				  bitstr_t **req_sock_map)
 {
 	List sock_gres_list = NULL;
 	ListIterator job_gres_iter,  node_gres_iter;
@@ -4803,7 +5485,7 @@ extern List gres_plugin_job_test2(List job_gres_list, List node_gres_list,
 					node_data_ptr, use_total_gres,
 					core_bitmap, sockets, cores_per_sock,
 					job_id, node_name, enforce_binding,
-					local_s_p_n);
+					local_s_p_n, req_sock_map);
 		} else if (node_data_ptr->type_cnt) {
 			sock_gres = _build_sock_gres_by_type(job_data_ptr,
 					node_data_ptr, use_total_gres,
@@ -4821,9 +5503,10 @@ extern List gres_plugin_job_test2(List job_gres_list, List node_gres_list,
 			FREE_NULL_LIST(sock_gres_list);
 			break;
 		}
-		sock_gres->job_specs = job_data_ptr;
-		sock_gres->gres_name = xstrdup(job_data_ptr->gres_name);
-		sock_gres->plugin_id = job_gres_ptr->plugin_id;
+		sock_gres->job_specs  = job_data_ptr;
+		sock_gres->gres_name  = xstrdup(job_data_ptr->gres_name);
+		sock_gres->node_specs = node_data_ptr;
+		sock_gres->plugin_id  = job_gres_ptr->plugin_id;
 		list_append(sock_gres_list, sock_gres);
 	}
 	list_iterator_destroy(job_gres_iter);
@@ -4856,131 +5539,1644 @@ fini:	return avail_cores_by_sock;
 }
 
 /*
- * Determine how many GRES can be used on this node given the available cores
+ * Determine which GRES can be used on this node given the available cores.
+ *	Filter out unusable GRES.
  * IN sock_gres_list  - list of sock_gres_t entries built by gres_plugin_job_test2()
  * IN avail_mem       - memory available for the job
+ * IN max_cpus        - maximum CPUs available on this node (limited by
+ *                      specialized cores and partition CPUs-per-node)
  * IN enforce_binding - GRES must be co-allocated with cores
  * IN core_bitmap     - Identification of available cores on this node
  * IN sockets         - Count of sockets on the node
  * IN cores_per_sock  - Count of cores per socket on this node
  * IN cpus_per_core   - Count of CPUs per core on this node
+ * IN sock_per_node   - sockets requested by job per node or NO_VAL
+ * IN task_per_node   - tasks requested by job per node or NO_VAL16
+ * OUT avail_gpus     - Count of available GPUs on this node
+ * OUT near_gpus      - Count of GPUs available on sockets with available CPUs
  * RET - 0 if job can use this node, -1 otherwise (some GRES limit prevents use)
  */
 extern int gres_plugin_job_core_filter2(List sock_gres_list, uint64_t avail_mem,
+					uint16_t max_cpus,
 					bool enforce_binding,
 					bitstr_t *core_bitmap,
 					uint16_t sockets,
 					uint16_t cores_per_sock,
-					uint16_t cpus_per_core)
+					uint16_t cpus_per_core,
+					uint32_t sock_per_node,
+					uint16_t task_per_node,
+					uint16_t *avail_gpus,
+					uint16_t *near_gpus)
 {
 	ListIterator sock_gres_iter;
 	sock_gres_t *sock_gres;
 	bool *avail_cores_by_sock = NULL;
-	uint64_t mem_per_gres = 0;
+	uint64_t max_gres, mem_per_gres = 0, near_gres_cnt = 0;
+	uint32_t gpu_plugin_id;
+	uint16_t cpus_per_gres;
 	int s, rc = 0;
-	int cpu_cnt;
 
+	*avail_gpus = 0;
+	*near_gpus = 0;
 	if (!core_bitmap || !sock_gres_list ||
 	    (list_count(sock_gres_list) == 0))
 		return rc;
 
-	cpu_cnt = bit_set_count(core_bitmap);
+	gpu_plugin_id = _build_id("gpu");
 	sock_gres_iter = list_iterator_create(sock_gres_list);
 	while ((sock_gres = (sock_gres_t *) list_next(sock_gres_iter))) {
-		uint64_t min_gres = 1;
+		uint64_t min_gres = 1, tmp_u64;
 		if (sock_gres->job_specs) {
 			gres_job_state_t *job_gres_ptr = sock_gres->job_specs;
 			if (job_gres_ptr->gres_per_node)
 				min_gres = job_gres_ptr-> gres_per_node;
-			if (job_gres_ptr->gres_per_socket)
-				min_gres = MAX(min_gres,
-					       job_gres_ptr->gres_per_socket);
-			if (job_gres_ptr->gres_per_task)
-				min_gres = MAX(min_gres,
-					       job_gres_ptr->gres_per_task);
-		}
-		if (sock_gres->job_specs && avail_mem) {
-			if (sock_gres->job_specs->mem_per_gres) {
-				mem_per_gres =
-					sock_gres->job_specs->mem_per_gres;
-			} else {
-				mem_per_gres =
-					sock_gres->job_specs->def_mem_per_gres;
+			if (job_gres_ptr->gres_per_socket) {
+				tmp_u64 = job_gres_ptr->gres_per_socket;
+				if (sock_per_node != NO_VAL)
+					tmp_u64 *= sock_per_node;
+				min_gres = MAX(min_gres, tmp_u64);
 			}
-			if (mem_per_gres == 0) {
-				/* No memory limit enforcement */
-			} else if (mem_per_gres <= avail_mem) {
-				sock_gres->max_gres = avail_mem / mem_per_gres;
+			if (job_gres_ptr->gres_per_task) {
+				tmp_u64 = job_gres_ptr->gres_per_task;
+				if (task_per_node != NO_VAL16)
+					tmp_u64 *= task_per_node;
+				min_gres = MAX(min_gres, tmp_u64);
+			}
+		}
+		if (!sock_gres->job_specs)
+			cpus_per_gres = 0;
+		else if (sock_gres->job_specs->cpus_per_gres)
+			cpus_per_gres = sock_gres->job_specs->cpus_per_gres;
+		else
+			cpus_per_gres = sock_gres->job_specs->def_cpus_per_gres;
+		if (cpus_per_gres) {
+			max_gres = max_cpus / cpus_per_gres;
+			if ((max_gres == 0) ||
+			    (sock_gres->job_specs->gres_per_node > max_gres) ||
+			    (sock_gres->job_specs->gres_per_task > max_gres) ||
+			    (sock_gres->job_specs->gres_per_socket > max_gres)){
+				/* Insufficient CPUs for any GRES */
+				rc = -1;
+				break;
+			}
+		}
+		if (!sock_gres->job_specs)
+			mem_per_gres = 0;
+		else if (sock_gres->job_specs->mem_per_gres)
+			mem_per_gres = sock_gres->job_specs->mem_per_gres;
+		else
+			mem_per_gres = sock_gres->job_specs->def_mem_per_gres;
+		if (mem_per_gres && avail_mem) {
+			if (mem_per_gres <= avail_mem) {
+				sock_gres->max_node_gres = avail_mem /
+							   mem_per_gres;
 			} else { /* Insufficient memory for any GRES */
 				rc = -1;
 				break;
 			}
 		}
-		if (sock_gres->cnt_by_sock) {
+		if (sock_gres->cnt_by_sock || enforce_binding) {
 			if (!avail_cores_by_sock) {
 				avail_cores_by_sock =_build_avail_cores_by_sock(
 							core_bitmap, sockets,
 							cores_per_sock);
 			}
+		}
+		/*
+		 * NOTE: gres_per_socket enforcement is performed by
+		 * _build_sock_gres_by_topo(), called by gres_plugin_job_test2()
+		 */
+		if (sock_gres->cnt_by_sock && enforce_binding) {
 			for (s = 0; s < sockets; s++) {
-				if (!avail_cores_by_sock[s]) {
+				if (avail_cores_by_sock[s] == 0) {
 					sock_gres->total_cnt -=
 						sock_gres->cnt_by_sock[s];
 					sock_gres->cnt_by_sock[s] = 0;
 				}
 			}
-		}
-		if (sock_gres->job_specs &&
-		    sock_gres->job_specs->gres_per_task) {
-			if (sock_gres->max_gres &&
-			    (sock_gres->job_specs->gres_per_task >
-			     sock_gres->max_gres)) {
-				rc = -1;
-				break;
+			near_gres_cnt = sock_gres->total_cnt;
+		} else if (sock_gres->cnt_by_sock) { /* NO enforce_binding */
+			near_gres_cnt = sock_gres->total_cnt;
+			for (s = 0; s < sockets; s++) {
+				if (avail_cores_by_sock[s] == 0) {
+					near_gres_cnt -=
+						sock_gres->cnt_by_sock[s];
+				}
 			}
-			if (sock_gres->job_specs->gres_per_task >
-			    sock_gres->total_cnt) {
-				rc = -1;
-				break;
-			} else {
-//FIXME: possibly set maximum task count to gres_per_task
-			}
+		} else {
+			near_gres_cnt = sock_gres->total_cnt;
 		}
 		if (sock_gres->job_specs &&
 		    sock_gres->job_specs->gres_per_node) {
-			if (sock_gres->max_gres &&
-			    (sock_gres->job_specs->gres_per_node >
-			     sock_gres->max_gres)) {
-				rc = -1;
-				break;
-			}
-			if (sock_gres->job_specs->gres_per_node >
-			    sock_gres->total_cnt) {
-				rc = -1;
-				break;
-			} else {
-//FIXME: possibly set maximum GRES count to gres_per_node
+			if ((sock_gres->max_node_gres == 0) ||
+			    (sock_gres->max_node_gres >
+			     sock_gres->job_specs->gres_per_node)) {
+				sock_gres->max_node_gres =
+					sock_gres->job_specs->gres_per_node;
 			}
 		}
-		if (sock_gres->job_specs &&
-		    sock_gres->job_specs->cpus_per_gres) {
+		if (cpus_per_gres) {
+			int cpu_cnt;
+			cpu_cnt = bit_set_count(core_bitmap);
 			cpu_cnt *= cpus_per_core;
-			if (sock_gres->job_specs->cpus_per_gres > cpu_cnt) {
+			max_gres = cpu_cnt / cpus_per_gres;
+			if (max_gres == 0) {
 				rc = -1;
 				break;
-			} else {
-//FIXME: possibly set maximum GRES count to cpu_cnt / cpus_per_gres
+			} else if ((sock_gres->max_node_gres == 0) ||
+				   (sock_gres->max_node_gres > max_gres)) {
+				sock_gres->max_node_gres = max_gres;
 			}
 		}
-		if (sock_gres->total_cnt < min_gres) {
+		if (mem_per_gres) {
+			max_gres = avail_mem / mem_per_gres;
+			sock_gres->total_cnt = MIN(sock_gres->total_cnt,
+						   max_gres);
+		}
+		if ((sock_gres->total_cnt < min_gres) ||
+		    ((sock_gres->max_node_gres != 0) &&
+		     (sock_gres->max_node_gres < min_gres))) {
 			rc = -1;
 			break;
+		}
+
+		if (sock_gres->plugin_id == gpu_plugin_id) {
+			 *avail_gpus += sock_gres->total_cnt;
+			if (sock_gres->max_node_gres &&
+			    (sock_gres->max_node_gres < near_gres_cnt))
+				near_gres_cnt = sock_gres->max_node_gres;
+			if (*near_gpus < 0xff)	/* avoid overflow */
+				*near_gpus += near_gres_cnt;
 		}
 	}
 	list_iterator_destroy(sock_gres_iter);
 	xfree(avail_cores_by_sock);
 
 	return rc;
+}
+
+/* Order GRES scheduling. Schedule GRES requiring specific sockets first */
+static int _sock_gres_sort(void *x, void *y)
+{
+	sock_gres_t *sock_gres1 = *(sock_gres_t **) x;
+	sock_gres_t *sock_gres2 = *(sock_gres_t **) y;
+	int weight1 = 0, weight2 = 0;
+
+	if (sock_gres1->node_specs && !sock_gres1->node_specs->topo_cnt)
+		weight1 += 0x02;
+	if (sock_gres1->job_specs && !sock_gres1->job_specs->gres_per_socket)
+		weight1 += 0x01;
+
+	if (sock_gres2->node_specs && !sock_gres2->node_specs->topo_cnt)
+		weight2 += 0x02;
+	if (sock_gres2->job_specs && !sock_gres2->job_specs->gres_per_socket)
+		weight2 += 0x01;
+
+	return weight1 - weight2;
+}
+
+/*
+ * Determine how many tasks can be started on a given node and which
+ *	sockets/cores are required
+ * IN mc_ptr - job's multi-core specs, NO_VAL and INFINITE mapped to zero
+ * IN sock_gres_list - list of sock_gres_t entries built by gres_plugin_job_test2()
+ * IN sockets - Count of sockets on the node
+ * IN cores_per_socket - Count of cores per socket on the node
+ * IN cpus_per_core - Count of CPUs per core on the node
+ * IN avail_cpus - Count of available CPUs on the node, UPDATED
+ * IN min_tasks_this_node - Minimum count of tasks that can be started on this
+ *                          node, UPDATED
+ * IN max_tasks_this_node - Maximum count of tasks that can be started on this
+ *                          node or NO_VAL, UPDATED
+ * IN rem_nodes - desired additional node count to allocate, including this node
+ * IN enforce_binding - GRES must be co-allocated with cores
+ * IN first_pass - set if first scheduling attempt for this job, use
+ *		   co-located GRES and cores if possible
+ * IN avail_cores - cores available on this node, UPDATED
+ */
+extern void gres_plugin_job_core_filter3(gres_mc_data_t *mc_ptr,
+					 List sock_gres_list,
+					 uint16_t sockets,
+					 uint16_t cores_per_socket,
+					 uint16_t cpus_per_core,
+					 uint16_t *avail_cpus,
+					 uint32_t *min_tasks_this_node,
+					 uint32_t *max_tasks_this_node,
+					 int rem_nodes,
+					 bool enforce_binding,
+					 bool first_pass,
+					 bitstr_t *avail_core)
+{
+	ListIterator sock_gres_iter;
+	sock_gres_t *sock_gres;
+	gres_job_state_t *job_specs;
+	int i, c, s, sock_cnt = 0, req_cores, rem_sockets, full_socket;
+	uint64_t cnt_avail_sock, cnt_avail_total, max_gres = 0, rem_gres = 0;
+	uint64_t max_tasks;
+	uint32_t task_cnt_incr;
+	bool *req_sock = NULL;	/* Required socket */
+	uint16_t *avail_cores_per_sock, cpus_per_gres;
+	uint16_t avail_cores_req = 0, avail_cores_tot;
+
+	if (*max_tasks_this_node == 0)
+		return;
+
+	xassert(avail_core);
+	avail_cores_per_sock = xmalloc(sizeof(uint16_t) * sockets);
+	task_cnt_incr = *min_tasks_this_node;
+	req_sock = xmalloc(sizeof(bool) * sockets);
+
+	list_sort(sock_gres_list, _sock_gres_sort);
+	sock_gres_iter = list_iterator_create(sock_gres_list);
+	while ((sock_gres = (sock_gres_t *) list_next(sock_gres_iter))) {
+		job_specs = sock_gres->job_specs;
+		if (!job_specs)
+			continue;
+		if (job_specs->gres_per_job) {
+			if (job_specs->total_gres >= job_specs->gres_per_job) {
+				/* Already reached gres_per_job limit */
+				*max_tasks_this_node = 0;
+				break;
+			}
+			rem_gres = job_specs->gres_per_job -
+				   job_specs->total_gres;
+		}
+
+		/*
+		 * gres_plugin_job_core_filter2() sets sock_gres->max_node_gres
+		 * for mem_per_gres enforcement; use it to set GRES limit for
+		 * this node (max_gres).
+		 */
+		if (sock_gres->max_node_gres) {
+			if (rem_gres && (rem_gres < sock_gres->max_node_gres))
+				max_gres = rem_gres;
+			else
+				max_gres = sock_gres->max_node_gres;
+		}
+		rem_nodes = MAX(rem_nodes, 1);
+		rem_sockets = MAX(1, mc_ptr->sockets_per_node);
+		if (max_gres &&
+		    ((job_specs->gres_per_node > max_gres) ||
+		     ((job_specs->gres_per_socket * rem_sockets) > max_gres))) {
+			*max_tasks_this_node = 0;
+			break;
+		}
+		if (job_specs->gres_per_node && job_specs->gres_per_task) {
+			max_tasks = job_specs->gres_per_node /
+				    job_specs->gres_per_task;
+			if ((max_tasks == 0) ||
+			    (max_tasks > *max_tasks_this_node) ||
+			    (max_tasks < *min_tasks_this_node)) {
+				*max_tasks_this_node = 0;
+				break;
+			}
+			if ((*max_tasks_this_node == NO_VAL) ||
+			    (*max_tasks_this_node > max_tasks))
+				*max_tasks_this_node = max_gres;
+			if (*min_tasks_this_node < max_gres)
+				*min_tasks_this_node = max_gres;
+		}
+
+		/* Filter out unusable GRES by socket */
+		avail_cores_tot = 0;
+		cnt_avail_total = sock_gres->cnt_any_sock;
+		for (s = 0; s < sockets; s++) {
+			/* Test for sufficient gres_per_socket */
+			if (sock_gres->cnt_by_sock) {
+				cnt_avail_sock = sock_gres->cnt_by_sock[s];
+			} else
+				cnt_avail_sock = 0;
+			if (job_specs->gres_per_socket >
+			    (sock_gres->cnt_any_sock + cnt_avail_sock)) {
+				/* Insufficient GRES on this socket */
+				if (sock_gres->cnt_by_sock) {
+					sock_gres->total_cnt -=
+						sock_gres->cnt_by_sock[s];
+					sock_gres->cnt_by_sock[s] = 0;
+				}
+				continue;
+			}
+
+			for (c = 0; c < cores_per_socket; c++) {
+				i = (s * cores_per_socket) + c;
+				if (bit_test(avail_core, i))
+					avail_cores_per_sock[s]++;
+			}
+			avail_cores_tot += avail_cores_per_sock[s];
+			/* Test for available cores on this socket */
+			if ((enforce_binding || first_pass) &&
+			    (avail_cores_per_sock[s] == 0))
+				continue;
+
+			cnt_avail_total += cnt_avail_sock;
+			avail_cores_req += avail_cores_per_sock[s];
+			req_sock[s] = true;
+			sock_cnt++;
+			if (job_specs->gres_per_node &&
+			    (cnt_avail_total >= job_specs->gres_per_node))
+				break;	/* Sufficient GRES */
+		}
+
+		if (job_specs->cpus_per_gres)
+			cpus_per_gres = job_specs->cpus_per_gres;
+		else
+			cpus_per_gres = job_specs->def_cpus_per_gres;
+		if (cpus_per_gres) {
+			max_gres = *avail_cpus / cpus_per_gres;
+			cnt_avail_total = MIN(cnt_avail_total, max_gres);
+		}
+		if ((cnt_avail_total == 0) ||
+		    (job_specs->gres_per_node > cnt_avail_total) ||
+		    (job_specs->gres_per_task > cnt_avail_total)) {
+			*max_tasks_this_node = 0;
+		}
+		if (job_specs->gres_per_task) {
+			max_tasks = cnt_avail_total / job_specs->gres_per_task;
+			*max_tasks_this_node = MIN(*max_tasks_this_node,
+						   max_tasks);
+		}
+
+		/*
+		 * min_tasks_this_node and max_tasks_this_node must be multiple
+		 * of original min_tasks_this_node value. This is to support
+		 * ntasks_per_* option and we just need to select a count of
+		 * tasks, sockets, etc. Round the values down.
+		 */
+		*min_tasks_this_node = (*min_tasks_this_node / task_cnt_incr) *
+				       task_cnt_incr;
+		*max_tasks_this_node = (*max_tasks_this_node / task_cnt_incr) *
+				       task_cnt_incr;
+
+		if (*max_tasks_this_node == 0)
+			break;
+		if (*max_tasks_this_node == NO_VAL) {
+			if (cpus_per_gres) {
+				i = *avail_cpus / cpus_per_gres;
+				sock_gres->total_cnt =
+					MIN(i, sock_gres->total_cnt);
+			}
+			continue;
+		}
+
+		/*
+		 * Determine how many cores are needed for this job.
+		 * Consider rounding errors if cpus_per_task not divisible
+		 * by cpus_per_core
+		 */
+		req_cores = *max_tasks_this_node;
+		if (mc_ptr->cpus_per_task) {
+			req_cores *= ((mc_ptr->cpus_per_task + cpus_per_core -1)
+				     / cpus_per_core);
+		}
+		if (cpus_per_gres) {
+			if (job_specs->gres_per_node) {
+				i = job_specs->gres_per_node;
+			} else if (job_specs->gres_per_socket) {
+				i = job_specs->gres_per_socket * sock_cnt;
+			} else if (job_specs->gres_per_task) {
+				i = job_specs->gres_per_task *
+				    *max_tasks_this_node;
+			} else if (sock_gres->total_cnt) {
+				i = sock_gres->total_cnt;
+			} else {
+				i = 1;
+			}
+			i *= cpus_per_gres;
+			i /= cpus_per_core;
+			req_cores = MAX(req_cores, i);
+		}
+
+		/* Clear extra avail_core bits on sockets we don't need */
+		if (avail_cores_tot > req_cores) {
+			for (s = 0; s < sockets; s++) {
+				if (avail_cores_tot == req_cores)
+					break;
+				if (req_sock[s])
+					continue;
+				for (c = 0; c < cores_per_socket; c++) {
+					i = (s * cores_per_socket) + c;
+					if (!bit_test(avail_core, i))
+						continue;
+					bit_clear(avail_core, i);
+					*avail_cpus -= cpus_per_core;
+					if (--avail_cores_tot == req_cores)
+						break;
+				}
+			}
+		}
+
+		/*
+		 * Clear extra avail_core bits on sockets we do need, but
+		 * spread them out so that every socket has some cores
+		 * available to use with the nearby GRES that we do need.
+		 */
+		while (avail_cores_tot > req_cores) {
+			full_socket = -1;
+			for (s = 0; s < sockets; s++) {
+				if (avail_cores_tot == req_cores)
+					break;
+				if (!req_sock[s] ||
+				    (avail_cores_per_sock[s] == 0))
+					continue;
+				if ((full_socket == -1) ||
+				    (avail_cores_per_sock[full_socket] <
+				     avail_cores_per_sock[s])) {
+					full_socket = s;
+				}
+			}
+			if (full_socket == -1)
+				break;
+			s = full_socket;
+			for (c = 0; c < cores_per_socket; c++) {
+				i = (s * cores_per_socket) + c;
+				if (!bit_test(avail_core, i))
+					continue;
+				bit_clear(avail_core, i);
+				*avail_cpus -= cpus_per_core;
+				avail_cores_per_sock[s]--;
+				avail_cores_tot--;
+				break;
+			}
+		}
+		if (cpus_per_gres) {
+			i = *avail_cpus / cpus_per_gres;
+			sock_gres->total_cnt = MIN(i, sock_gres->total_cnt);
+		}
+	}
+	list_iterator_destroy(sock_gres_iter);
+	xfree(avail_cores_per_sock);
+	xfree(req_sock);
+
+	*avail_cpus = MIN(*avail_cpus,
+			  (*max_tasks_this_node * mc_ptr->cpus_per_task));
+}
+
+/*
+ * Return count of sockets allocated to this job on this node
+ * job_res IN - job resource allocation
+ * node_inx IN - global node index
+ * job_node_inx IN - node index for this job's allocation
+ * RET socket count
+ */
+static int _get_sock_cnt(struct job_resources *job_res, int node_inx,
+			 int job_node_inx)
+{
+	int core_offset, used_sock_cnt = 0;
+	uint16_t sock_cnt = 0, cores_per_socket_cnt = 0;
+	int c, i, rc, s;
+
+	rc = get_job_resources_cnt(job_res, job_node_inx, &sock_cnt,
+				   &cores_per_socket_cnt);
+	if (rc != SLURM_SUCCESS) {
+		error("cons_tres: %s: Invalid socket/core count", __func__);
+		return 1;
+	}
+	core_offset = get_job_resources_offset(job_res, job_node_inx, 0, 0);
+	if (core_offset < 0) {
+		error("cons_tres: %s: Invalid core offset", __func__);
+		return 1;
+	}
+	for (s = 0; s < sock_cnt; s++) {
+		for (c = 0; c < cores_per_socket_cnt; c++) {
+			i = (s * cores_per_socket_cnt) + c;
+			if (bit_test(job_res->core_bitmap, (core_offset + i)))
+				used_sock_cnt++;
+		}
+	}
+	if (used_sock_cnt == 0) {
+		error("cons_tres: %s: No allocated cores found", __func__);
+		return 1;
+	}
+	return used_sock_cnt;
+}
+
+/*
+ * Select specific GRES (set GRES bitmap) for this job on this node based upon
+ *	per-job resource specification. Use only socket-local GRES
+ * job_res IN - job resource allocation
+ * node_inx IN - global node index
+ * job_node_inx IN - node index for this job's allocation
+ * rem_nodes IN - count of nodes remaining to place resources on
+ * job_specs IN - job request specifications, UPDATED: set bits in
+ *		  gres_bit_select
+ * node_specs IN - node resource request specifications
+ * job_id IN - job ID for logging
+ * tres_mc_ptr IN - job's multi-core options
+ * RET 0:more work, 1:fini
+ */
+static int _set_job_bits1(struct job_resources *job_res, int node_inx,
+			  int job_node_inx, int rem_nodes,
+			  sock_gres_t *sock_gres, uint32_t job_id,
+			  gres_mc_data_t *tres_mc_ptr)
+{
+	int core_offset, gres_cnt;
+	uint16_t sock_cnt = 0, cores_per_socket_cnt = 0;
+	int c, i, g, rc, s;
+	gres_job_state_t *job_specs;
+	gres_node_state_t *node_specs;
+	int *used_sock = NULL, alloc_gres_cnt = 0;
+	int max_gres;
+	int fini = 0;
+
+	job_specs = sock_gres->job_specs;
+	node_specs = sock_gres->node_specs;
+	if (job_specs->gres_per_job == job_specs->total_gres)
+		fini = 1;
+	rc = get_job_resources_cnt(job_res, job_node_inx, &sock_cnt,
+				   &cores_per_socket_cnt);
+	if (rc != SLURM_SUCCESS) {
+		error("cons_tres: %s: Invalid socket/core count for job %u on node %d",
+		      __func__, job_id, node_inx);
+		return rc;
+	}
+	core_offset = get_job_resources_offset(job_res, job_node_inx, 0, 0);
+	if (core_offset < 0) {
+		error("cons_tres: %s: Invalid core offset for job %u on node %d",
+		      __func__, job_id, node_inx);
+		return rc;
+	}
+	i = sock_gres->sock_cnt;
+	if ((i != 0) && (i != sock_cnt)) {
+		error("cons_tres: %s: Inconsistent socket count (%d != %d) for job %u on node %d",
+		      __func__, i, sock_cnt, job_id, node_inx);
+		sock_cnt = MIN(sock_cnt, i);
+	}
+
+	xassert(job_res->core_bitmap);
+	if (job_node_inx == 0)
+		job_specs->total_gres = 0;
+	max_gres = job_specs->gres_per_job - job_specs->total_gres -
+		   (rem_nodes - 1);
+	used_sock = xmalloc(sizeof(int) * sock_cnt);
+	gres_cnt = bit_size(job_specs->gres_bit_select[node_inx]);
+	for (s = 0; s < sock_cnt; s++) {
+		for (c = 0; c < cores_per_socket_cnt; c++) {
+			i = (s * cores_per_socket_cnt) + c;
+			if (bit_test(job_res->core_bitmap, (core_offset + i))) {
+				used_sock[s]++;
+				break;
+			}
+		}
+	}
+
+	/*
+	 * Now pick specific GRES for these sockets.
+	 */
+	for (s = 0; ((s < sock_cnt) && (alloc_gres_cnt < max_gres)); s++) {
+		if (!used_sock[s])
+			continue;
+		for (g = 0; ((g < gres_cnt) && (alloc_gres_cnt < max_gres));
+		     g++) {
+			if (sock_gres->bits_by_sock[s] &&
+			    !bit_test(sock_gres->bits_by_sock[s], g))
+				continue;   /* GRES not on this socket */
+			if (bit_test(node_specs->gres_bit_alloc, g) ||
+			    bit_test(job_specs->gres_bit_select[node_inx], g))
+				continue;   /* Already allocated GRES */
+			bit_set(job_specs->gres_bit_select[node_inx], g);
+			job_specs->gres_cnt_node_select[node_inx]++;
+			alloc_gres_cnt++;
+			job_specs->total_gres++;
+		}
+	}
+	if (alloc_gres_cnt == 0) {
+		for (s = 0; ((s < sock_cnt) && (alloc_gres_cnt == 0)); s++) {
+			if (used_sock[s])
+				continue;
+			for (g = 0; g < gres_cnt; g++) {
+				if (sock_gres->bits_by_sock    &&
+				    sock_gres->bits_by_sock[s] &&
+				    !bit_test(sock_gres->bits_by_sock[s], g))
+					continue;   /* GRES not on this socket */
+				if (bit_test(node_specs->gres_bit_alloc, g) ||
+				    bit_test(job_specs->
+					     gres_bit_select[node_inx], g))
+					continue;   /* Already allocated GRES */
+				bit_set(job_specs->gres_bit_select[node_inx],g);
+				job_specs->gres_cnt_node_select[node_inx]++;
+				alloc_gres_cnt++;
+				job_specs->total_gres++;
+				break;
+			}
+		}
+	}
+	if (alloc_gres_cnt == 0) {
+		error("cons_tres: %s: job %u failed to find any available GRES on node %d",
+		      __func__, job_id, node_inx);
+	}
+	xfree(used_sock);
+	if (job_specs->gres_per_job == job_specs->total_gres)
+		fini = 1;
+	return fini;
+}
+
+/*
+ * Select specific GRES (set GRES bitmap) for this job on this node based upon
+ *	per-job resource specification. Use any GRES on the node
+ * job_res IN - job resource allocation
+ * node_inx IN - global node index
+ * job_node_inx IN - node index for this job's allocation
+ * job_specs IN - job request specifications, UPDATED: set bits in
+ *		  gres_bit_select
+ * node_specs IN - node resource request specifications
+ * job_id IN - job ID for logging
+ * tres_mc_ptr IN - job's multi-core options
+ * RET 0:more work, 1:fini
+ */
+static int _set_job_bits2(struct job_resources *job_res, int node_inx,
+			  int job_node_inx, sock_gres_t *sock_gres,
+			  uint32_t job_id, gres_mc_data_t *tres_mc_ptr)
+{
+	int core_offset, gres_cnt;
+	uint16_t sock_cnt = 0, cores_per_socket_cnt = 0;
+	int i, g, rc, s;
+	gres_job_state_t *job_specs;
+	gres_node_state_t *node_specs;
+	int fini = 0;
+
+	job_specs = sock_gres->job_specs;
+	node_specs = sock_gres->node_specs;
+	if (job_specs->gres_per_job == job_specs->total_gres) {
+		fini = 1;
+		return fini;
+	}
+	if (!job_specs->gres_bit_select ||
+	   !job_specs->gres_bit_select[node_inx]) {
+		error("cons_tres: %s: gres_bit_select NULL for job %u on node %d",
+		      __func__, job_id, node_inx);
+		return SLURM_ERROR;
+	}
+	rc = get_job_resources_cnt(job_res, job_node_inx, &sock_cnt,
+				   &cores_per_socket_cnt);
+	if (rc != SLURM_SUCCESS) {
+		error("cons_tres: %s: Invalid socket/core count for job %u on node %d",
+		      __func__, job_id, node_inx);
+		return rc;
+	}
+	core_offset = get_job_resources_offset(job_res, job_node_inx, 0, 0);
+	if (core_offset < 0) {
+		error("cons_tres: %s: Invalid core offset for job %u on node %d",
+		      __func__, job_id, node_inx);
+		return rc;
+	}
+	i = sock_gres->sock_cnt;
+	if ((i != 0) && (i != sock_cnt)) {
+		error("cons_tres: %s: Inconsistent socket count (%d != %d) for job %u on node %d",
+		      __func__, i, sock_cnt, job_id, node_inx);
+		sock_cnt = MIN(sock_cnt, i);
+	}
+
+	xassert(job_res->core_bitmap);
+	/*
+	 * Now pick specific GRES for these sockets.
+	 */
+	gres_cnt = bit_size(job_specs->gres_bit_select[node_inx]);
+	for (s = 0;
+	     ((s < sock_cnt) &&
+	      (job_specs->gres_per_job > job_specs->total_gres)); s++) {
+		for (g = 0;
+		     ((g < gres_cnt) &&
+		      (job_specs->gres_per_job > job_specs->total_gres)); g++) {
+			if (sock_gres->bits_by_sock &&
+			    sock_gres->bits_by_sock[s] &&
+			    !bit_test(sock_gres->bits_by_sock[s], g))
+				continue;   /* GRES not on this socket */
+			if (bit_test(node_specs->gres_bit_alloc, g) ||
+			    bit_test(job_specs->gres_bit_select[node_inx], g))
+				continue;   /* Already allocated GRES */
+			bit_set(job_specs->gres_bit_select[node_inx], g);
+			job_specs->gres_cnt_node_select[node_inx]++;
+			job_specs->total_gres++;
+		}
+	}
+	if (job_specs->gres_per_job == job_specs->total_gres)
+		fini = 1;
+	return fini;
+}
+
+
+/*
+ * Select specific GRES (set GRES bitmap) for this job on this node based upon
+ *	per-node resource specification
+ * job_res IN - job resource allocation
+ * node_inx IN - global node index
+ * job_node_inx IN - node index for this job's allocation
+ * job_specs IN - job request specifications, UPDATED: set bits in
+ *		  gres_bit_select
+ * node_specs IN - node resource request specifications
+ * job_id IN - job ID for logging
+ * tres_mc_ptr IN - job's multi-core options
+ */
+static void _set_node_bits(struct job_resources *job_res, int node_inx,
+			   int job_node_inx, sock_gres_t *sock_gres,
+			   uint32_t job_id, gres_mc_data_t *tres_mc_ptr)
+{
+	int core_offset, gres_cnt;
+	uint16_t sock_cnt = 0, cores_per_socket_cnt = 0;
+	int c, i, g, rc, s;
+	gres_job_state_t *job_specs;
+	gres_node_state_t *node_specs;
+	int *used_sock = NULL, alloc_gres_cnt = 0;
+
+	job_specs = sock_gres->job_specs;
+	node_specs = sock_gres->node_specs;
+	rc = get_job_resources_cnt(job_res, job_node_inx, &sock_cnt,
+				   &cores_per_socket_cnt);
+	if (rc != SLURM_SUCCESS) {
+		error("cons_tres: %s: Invalid socket/core count for job %u on node %d",
+		      __func__, job_id, node_inx);
+		return;
+	}
+	core_offset = get_job_resources_offset(job_res, job_node_inx, 0, 0);
+	if (core_offset < 0) {
+		error("cons_tres: %s: Invalid core offset for job %u on node %d",
+		      __func__, job_id, node_inx);
+		return;
+	}
+	i = sock_gres->sock_cnt;
+	if ((i != 0) && (i != sock_cnt)) {
+		error("cons_tres: %s: Inconsistent socket count (%d != %d) for job %u on node %d",
+		      __func__, i, sock_cnt, job_id, node_inx);
+		sock_cnt = MIN(sock_cnt, i);
+	}
+
+	xassert(job_res->core_bitmap);
+	used_sock = xmalloc(sizeof(int) * sock_cnt);
+	gres_cnt = bit_size(job_specs->gres_bit_select[node_inx]);
+	for (s = 0; s < sock_cnt; s++) {
+		for (c = 0; c < cores_per_socket_cnt; c++) {
+			i = (s * cores_per_socket_cnt) + c;
+			if (bit_test(job_res->core_bitmap, (core_offset + i))) {
+				used_sock[s]++;
+				break;
+			}
+		}
+	}
+
+	/*
+	 * Now pick specific GRES for these sockets.
+	 * First: Try to place one GRES per socket in this job's allocation.
+	 * Second: Try to place additional GRES on allocated sockets.
+	 * Third: Use any additional available GRES.
+	 */
+	for (s = 0;
+	     ((s < sock_cnt) && (alloc_gres_cnt < job_specs->gres_per_node));
+	     s++) {
+		if (!used_sock[s])
+			continue;
+		for (g = 0; g < gres_cnt; g++) {
+			if (sock_gres->bits_by_sock    &&
+			    sock_gres->bits_by_sock[s] &&
+			    !bit_test(sock_gres->bits_by_sock[s], g))
+				continue;   /* GRES not on this socket */
+			if (bit_test(node_specs->gres_bit_alloc, g) ||
+			    bit_test(job_specs->gres_bit_select[node_inx], g))
+				continue;   /* Already allocated GRES */
+			bit_set(job_specs->gres_bit_select[node_inx], g);
+			job_specs->gres_cnt_node_select[node_inx]++;
+			alloc_gres_cnt++;
+			break;
+		}
+	}
+	/* Try to place additional GRES on allocated sockets. */
+	for (s = 0;
+	     ((s < sock_cnt) && (alloc_gres_cnt < job_specs->gres_per_node));
+	     s++) {
+		if (!used_sock[s])
+			continue;
+		for (g = 0; g < gres_cnt; g++) {
+			if (sock_gres->bits_by_sock    &&
+			    sock_gres->bits_by_sock[s] &&
+			    !bit_test(sock_gres->bits_by_sock[s], g))
+				continue;   /* GRES not on this socket */
+			if (bit_test(node_specs->gres_bit_alloc, g) ||
+			    bit_test(job_specs->gres_bit_select[node_inx], g))
+				continue;   /* Already allocated GRES */
+			bit_set(job_specs->gres_bit_select[node_inx], g);
+			job_specs->gres_cnt_node_select[node_inx]++;
+			if (++alloc_gres_cnt == job_specs->gres_per_node)
+				break;
+		}
+	}
+	/* Use any additional available GRES. */
+	for (s = 0;
+	     ((s < sock_cnt) && (alloc_gres_cnt < job_specs->gres_per_node));
+	     s++) {
+		if (used_sock[s])
+			continue;
+		for (g = 0; g < gres_cnt; g++) {
+			if (sock_gres->bits_by_sock    &&
+			    sock_gres->bits_by_sock[s] &&
+			    !bit_test(sock_gres->bits_by_sock[s], g))
+				continue;   /* GRES not on this socket */
+			if (bit_test(node_specs->gres_bit_alloc, g) ||
+			    bit_test(job_specs->gres_bit_select[node_inx], g))
+				continue;   /* Already allocated GRES */
+			bit_set(job_specs->gres_bit_select[node_inx], g);
+			job_specs->gres_cnt_node_select[node_inx]++;
+			if (++alloc_gres_cnt == job_specs->gres_per_node)
+				break;
+		}
+	}
+	xfree(used_sock);
+}
+
+/*
+ * Select specific GRES (set GRES bitmap) for this job on this node based upon
+ *	per-socket resource specification
+ * job_res IN - job resource allocation
+ * node_inx IN - global node index
+ * job_node_inx IN - node index for this job's allocation
+ * job_specs IN - job request specifications, UPDATED: set bits in
+ *		  gres_bit_select
+ * node_specs IN - node resource request specifications
+ * job_id IN - job ID for logging
+ * tres_mc_ptr IN - job's multi-core options
+ */
+static void _set_sock_bits(struct job_resources *job_res, int node_inx,
+			   int job_node_inx, sock_gres_t *sock_gres,
+			   uint32_t job_id, gres_mc_data_t *tres_mc_ptr)
+{
+	int core_offset, gres_cnt;
+	uint16_t sock_cnt = 0, cores_per_socket_cnt = 0;
+	int c, i, g, rc, s;
+	gres_job_state_t *job_specs;
+	gres_node_state_t *node_specs;
+	int *used_sock = NULL, used_sock_cnt = 0;
+
+	job_specs = sock_gres->job_specs;
+	node_specs = sock_gres->node_specs;
+	rc = get_job_resources_cnt(job_res, job_node_inx, &sock_cnt,
+				   &cores_per_socket_cnt);
+	if (rc != SLURM_SUCCESS) {
+		error("cons_tres: %s: Invalid socket/core count for job %u on node %d",
+		      __func__, job_id, node_inx);
+		return;
+	}
+	core_offset = get_job_resources_offset(job_res, job_node_inx, 0, 0);
+	if (core_offset < 0) {
+		error("cons_tres: %s: Invalid core offset for job %u on node %d",
+		      __func__, job_id, node_inx);
+		return;
+	}
+	i = sock_gres->sock_cnt;
+	if ((i != 0) && (i != sock_cnt)) {
+		error("cons_tres: %s: Inconsistent socket count (%d != %d) for job %u on node %d",
+		      __func__, i, sock_cnt, job_id, node_inx);
+		sock_cnt = MIN(sock_cnt, i);
+	}
+
+	xassert(job_res->core_bitmap);
+	used_sock = xmalloc(sizeof(int) * sock_cnt);
+	gres_cnt = bit_size(job_specs->gres_bit_select[node_inx]);
+	for (s = 0; s < sock_cnt; s++) {
+		for (c = 0; c < cores_per_socket_cnt; c++) {
+			i = (s * cores_per_socket_cnt) + c;
+			if (bit_test(job_res->core_bitmap, (core_offset + i))) {
+				used_sock[s]++;
+				used_sock_cnt++;
+				break;
+			}
+		}
+	}
+	if (tres_mc_ptr && tres_mc_ptr->sockets_per_node    &&
+	    (tres_mc_ptr->sockets_per_node != used_sock_cnt) &&
+	    node_specs->gres_bit_alloc && sock_gres->bits_by_sock) {
+		if (tres_mc_ptr->sockets_per_node > used_sock_cnt) {
+			/* Somehow we have too few sockets in job allocation */
+			error("cons_tres: %s: Inconsistent requested/allocated "
+			      "socket count (%d > %d) for job %u on node %d",
+			      __func__, tres_mc_ptr->sockets_per_node,
+			      used_sock_cnt, job_id, node_inx);
+			for (s = 0; s < sock_cnt; s++) {
+				if (used_sock[s] || !sock_gres->bits_by_sock[s])
+					continue;
+				/* Determine currently free GRES by socket */
+				used_sock[s] = bit_set_count(
+						sock_gres->bits_by_sock[s]) -
+					       bit_overlap(
+						sock_gres->bits_by_sock[s],
+						node_specs->gres_bit_alloc);
+				if ((used_sock[s] == 0) ||
+				    (used_sock[s] < job_specs->gres_per_socket)){
+					used_sock[s] = 0;
+				} else if (++used_sock_cnt ==
+					   tres_mc_ptr->sockets_per_node) {
+					break;
+				}
+			}
+		} else {
+			/* May have needed extra CPUs, exceeding socket count */
+			debug("cons_tres: %s: Inconsistent requested/allocated "
+			      "socket count (%d < %d) for job %u on node %d",
+			      __func__, tres_mc_ptr->sockets_per_node,
+			      used_sock_cnt, job_id, node_inx);
+			for (s = 0; s < sock_cnt; s++) {
+				if (!used_sock[s] ||
+				    !sock_gres->bits_by_sock[s])
+					continue;
+				/* Determine currently free GRES by socket */
+				used_sock[s] = bit_set_count(
+						sock_gres->bits_by_sock[s]) -
+					       bit_overlap(
+						sock_gres->bits_by_sock[s],
+						node_specs->gres_bit_alloc);
+				if (used_sock[s] == 0)
+					used_sock_cnt--;
+			}
+			/* Exclude sockets with low GRES counts */
+			while (tres_mc_ptr->sockets_per_node > used_sock_cnt) {
+				int low_sock_inx = -1;
+				for (s = sock_cnt - 1; s >= 0; s--) {
+					if (used_sock[s] == 0)
+						continue;
+					if ((low_sock_inx == -1) ||
+					    (used_sock[s] <
+					     used_sock[low_sock_inx]))
+						low_sock_inx = s;
+				}
+				if (low_sock_inx == -1)
+					break;
+				used_sock[low_sock_inx] = 0;
+				used_sock_cnt--;
+			}
+		}
+	}
+
+	/* Now pick specific GRES for these sockets */
+	for (s = 0; s < sock_cnt; s++) {
+		if (!used_sock[s])
+			continue;
+		i = 0;
+		for (g = 0; g < gres_cnt; g++) {
+			if (sock_gres->bits_by_sock    &&
+			    sock_gres->bits_by_sock[s] &&
+			    !bit_test(sock_gres->bits_by_sock[s], g))
+				continue;   /* GRES not on this socket */
+			if (node_specs->gres_bit_alloc &&
+			    bit_test(node_specs->gres_bit_alloc, g))
+				continue;   /* Already allocated GRES */
+			if (job_specs->gres_bit_select[node_inx] &&
+			    bit_test(job_specs->gres_bit_select[node_inx], g))
+				continue;   /* Already allocated GRES */
+			bit_set(job_specs->gres_bit_select[node_inx], g);
+			job_specs->gres_cnt_node_select[node_inx]++;
+			if (++i == job_specs->gres_per_socket)
+				break;
+		}
+	}
+	xfree(used_sock);
+}
+
+/*
+ * Select specific GRES (set GRES bitmap) for this job on this node based upon
+ *	per-task resource specification
+ * job_res IN - job resource allocation
+ * node_inx IN - global node index
+ * job_node_inx IN - node index for this job's allocation
+ * job_specs IN - job request specifications, UPDATED: set bits in
+ *		  gres_bit_select
+ * node_specs IN - node resource request specifications
+ * job_id IN - job ID for logging
+ * tres_mc_ptr IN - job's multi-core options
+ */
+static void _set_task_bits(struct job_resources *job_res, int node_inx,
+			   int job_node_inx, sock_gres_t *sock_gres,
+			   uint32_t job_id, gres_mc_data_t *tres_mc_ptr,
+			   uint32_t **tasks_per_node_socket)
+{
+	uint16_t sock_cnt = 0;
+	int gres_cnt, g, s;
+	gres_job_state_t *job_specs;
+	gres_node_state_t *node_specs;
+	uint32_t total_tasks = 0;
+	uint64_t total_gres_cnt = 0, total_gres_goal;
+
+	job_specs = sock_gres->job_specs;
+	node_specs = sock_gres->node_specs;
+	sock_cnt = sock_gres->sock_cnt;
+	gres_cnt = bit_size(job_specs->gres_bit_select[node_inx]);
+
+	/* First pick GRES for acitve sockets */
+	for (s = 0; s < sock_cnt; s++) {
+		if (!tasks_per_node_socket[node_inx] ||
+		    (tasks_per_node_socket[node_inx][s] == 0))
+			continue;
+		total_tasks += tasks_per_node_socket[node_inx][s];
+		total_gres_goal = total_tasks * job_specs->gres_per_task;
+		for (g = 0; g < gres_cnt; g++) {
+			if (total_gres_cnt >= total_gres_goal)
+				break;
+			if (sock_gres->bits_by_sock &&
+			    sock_gres->bits_by_sock[s] &&
+			    !bit_test(sock_gres->bits_by_sock[s], g))
+				continue;   /* GRES not on this socket */
+			if (bit_test(node_specs->gres_bit_alloc, g))
+				continue;   /* Already allocated GRES */
+			if (bit_test(node_specs->gres_bit_alloc, g) ||
+			    bit_test(job_specs->gres_bit_select[node_inx], g))
+				continue;   /* Already allocated GRES */
+			bit_set(job_specs->gres_bit_select[node_inx], g);
+			job_specs->gres_cnt_node_select[node_inx]++;
+			total_gres_cnt++;
+		}
+	}
+
+	/* Next pick additional GRES as needed */
+	total_gres_goal = total_tasks * job_specs->gres_per_task;
+	if (total_gres_cnt >= total_gres_goal)
+		return;
+	for (s = 0; s < sock_cnt; s++) {
+		if (total_gres_cnt >= total_gres_goal)
+			break;
+		for (g = 0; g < gres_cnt; g++) {
+			if (total_gres_cnt >= total_gres_goal)
+				break;
+			if (sock_gres->bits_by_sock &&
+			    sock_gres->bits_by_sock[s] &&
+			    !bit_test(sock_gres->bits_by_sock[s], g))
+				continue;   /* GRES not on this socket */
+			if (bit_test(node_specs->gres_bit_alloc, g) ||
+			    bit_test(job_specs->gres_bit_select[node_inx], g))
+				continue;   /* Already allocated GRES */
+			bit_set(job_specs->gres_bit_select[node_inx], g);
+			job_specs->gres_cnt_node_select[node_inx]++;
+			total_gres_cnt++;
+		}
+		if (total_gres_cnt == total_gres_goal)
+			break;
+	}
+}
+
+/* Build array to identify task count for each node-socket pair */
+static uint32_t **_build_tasks_per_node_sock(struct job_resources *job_res,
+					     uint8_t overcommit,
+					     gres_mc_data_t *tres_mc_ptr,
+					     struct node_record *node_table_ptr)
+{
+	uint32_t **tasks_per_node_socket;
+	int i, i_first, i_last, j, node_cnt, job_node_inx = 0;
+	int c, s, core_offset;
+	int cpus_per_task = 1, cpus_per_node, cpus_per_core;
+	int task_per_node_limit = 0;
+	int32_t rem_tasks, excess_tasks;
+	uint16_t sock_cnt = 0, cores_per_socket_cnt = 0;
+
+	rem_tasks = tres_mc_ptr->ntasks_per_job;
+	node_cnt = bit_size(job_res->node_bitmap);
+	tasks_per_node_socket = xmalloc(sizeof(uint32_t *) * node_cnt);
+	i_first = bit_ffs(job_res->node_bitmap);
+	if (i_first != -1)
+		i_last  = bit_fls(job_res->node_bitmap);
+	else
+		i_last = -2;
+	for (i = i_first; i <= i_last; i++) {
+		int tasks_per_node = 0;
+		if (!bit_test(job_res->node_bitmap, i))
+			continue;
+		if (get_job_resources_cnt(job_res, job_node_inx, &sock_cnt,
+					  &cores_per_socket_cnt)) {
+			error("%s: failed to get socket/core count", __func__);
+			/* Set default of 1 task on socket 0 */
+			tasks_per_node_socket[i] = xmalloc(sizeof(uint32_t));
+			tasks_per_node_socket[i][0] = 1;
+			rem_tasks--;
+			continue;
+		}
+		tasks_per_node_socket[i] = xmalloc(sizeof(uint32_t) * sock_cnt);
+		if (tres_mc_ptr->ntasks_per_node) {
+			task_per_node_limit = tres_mc_ptr->ntasks_per_node;
+		} else if (job_res->tasks_per_node &&
+			   job_res->tasks_per_node[job_node_inx]) {
+			task_per_node_limit =
+				job_res->tasks_per_node[job_node_inx];
+		} else {
+			/*
+			 * NOTE: We should never get here.
+			 * cpus_per_node reports CPUs actually used by this
+			 * job on this node. Divide by cpus_per_task to yield
+			 * valid task count on this node. This can be bad on
+			 * cores with more than one thread and job fails to
+			 * use all threads.
+			 */
+			error("%s: tasks_per_node not set", __func__);
+			cpus_per_node = get_job_resources_cpus(job_res,
+							       job_node_inx);
+			if (cpus_per_node < 1) {
+				error("%s: failed to get cpus_per_node count",
+				      __func__);
+				/* Set default of 1 task on socket 0 */
+				tasks_per_node_socket[i][0] = 1;
+				rem_tasks--;
+				continue;
+			}
+			if (tres_mc_ptr->cpus_per_task)
+				cpus_per_task = tres_mc_ptr->cpus_per_task;
+			else
+				cpus_per_task = 1;
+			task_per_node_limit = cpus_per_node / cpus_per_task;
+		}
+		core_offset = get_job_resources_offset(job_res, job_node_inx++,
+						       0, 0);
+		if (node_table_ptr[i].cores) {
+			cpus_per_core = node_table_ptr[i].cpus /
+					node_table_ptr[i].cores;
+		} else
+			cpus_per_core = 1;
+		for (s = 0; s < sock_cnt; s++) {
+			int tasks_per_socket = 0, tpc, skip_cores = 0;
+			for (c = 0; c < cores_per_socket_cnt; c++) {
+				j = (s * cores_per_socket_cnt) + c;
+				j += core_offset;
+				if (!bit_test(job_res->core_bitmap, j))
+					continue;
+				if (skip_cores > 0) {
+					skip_cores--;
+					continue;
+				}
+				if (tres_mc_ptr->ntasks_per_core) {
+					tpc = tres_mc_ptr->ntasks_per_core;
+				} else {
+					tpc = cpus_per_core / cpus_per_task;
+					if (tpc < 1) {
+						tpc = 1;
+						skip_cores = cpus_per_task /
+							     cpus_per_core;
+						skip_cores--;	/* This core */
+					}
+					/* Start with 1 task per core */
+				}
+				tasks_per_node_socket[i][s] += tpc;
+				tasks_per_node += tpc;
+				tasks_per_socket += tpc;
+				rem_tasks -= tpc;
+				if (task_per_node_limit) {
+					if (tasks_per_node >
+					    task_per_node_limit) {
+						excess_tasks = tasks_per_node -
+							task_per_node_limit;
+						tasks_per_node_socket[i][s] -=
+							excess_tasks;
+						rem_tasks += excess_tasks;
+					}
+					if (tasks_per_node >=
+					    task_per_node_limit) {
+						s = sock_cnt;
+						break;
+					}
+				}
+				/* NOTE: No support for ntasks_per_board */
+				if (tres_mc_ptr->ntasks_per_socket) {
+					if (tasks_per_socket >
+					    tres_mc_ptr->ntasks_per_socket) {
+						excess_tasks = tasks_per_socket-
+						 tres_mc_ptr->ntasks_per_socket;
+						tasks_per_node_socket[i][s] -=
+							excess_tasks;
+						rem_tasks += excess_tasks;
+					}
+					if (tasks_per_socket >=
+					    tres_mc_ptr->ntasks_per_socket) {
+						break;
+					}
+				}
+			}
+		}
+	}
+	while ((rem_tasks > 0) && overcommit) {
+		for (i = i_first; (rem_tasks > 0) && (i <= i_last); i++) {
+			if (!bit_test(job_res->node_bitmap, i))
+				continue;
+			for (s = 0; (rem_tasks > 0) && (s < sock_cnt); s++) {
+				for (c = 0; c < cores_per_socket_cnt; c++) {
+					j = (s * cores_per_socket_cnt) + c;
+					if (!bit_test(job_res->core_bitmap, j))
+						continue;
+					tasks_per_node_socket[i][s]++;
+					rem_tasks--;
+					break;
+				}
+			}
+		}
+	}
+	if (rem_tasks > 0)	/* This should never happen */
+		error("%s: rem_tasks not zero (%d > 0)", __func__, rem_tasks);
+
+	return tasks_per_node_socket;
+}
+
+static void _free_tasks_per_node_sock(uint32_t **tasks_per_node_socket,
+				      int node_cnt)
+{
+	int n;
+
+	if (!tasks_per_node_socket)
+		return;
+
+	for (n = 0; n < node_cnt; n++)
+		xfree(tasks_per_node_socket[n]);
+	xfree(tasks_per_node_socket);
+}
+
+/* Return the count of tasks for a job on a given node */
+static uint32_t _get_task_cnt_node(uint32_t **tasks_per_node_socket,
+				   int node_inx, int sock_cnt)
+{
+	uint32_t task_cnt = 0;
+	int s;
+
+	if (!tasks_per_node_socket || !tasks_per_node_socket[node_inx]) {
+		error("%s: tasks_per_node_socket is NULL", __func__);
+		return 1;	/* Best guess if no data structure */
+	}
+
+	for (s = 0; s < sock_cnt; s++)
+		task_cnt += tasks_per_node_socket[node_inx][s];
+
+	return task_cnt;
+}
+
+/* Determine maximum GRES allocation count on this node; no topology */
+static uint64_t _get_job_cnt(sock_gres_t *sock_gres,
+			     gres_node_state_t *node_specs, int rem_node_cnt)
+{
+	uint64_t avail_gres, max_gres;
+	gres_job_state_t *job_specs = sock_gres->job_specs;
+
+	avail_gres = node_specs->gres_cnt_avail - node_specs->gres_cnt_alloc;
+	/* Insure at least one GRES per node on remaining nodes */
+	max_gres = job_specs->gres_per_job - job_specs->total_gres -
+		   (rem_node_cnt - 1);
+	max_gres = MIN(avail_gres, max_gres);
+
+	return max_gres;
+}
+
+/* Return count of GRES on this node */
+static int _get_gres_node_cnt(gres_node_state_t *node_specs, int node_inx)
+{
+	int i, gres_cnt = 0;
+
+	if (node_specs->gres_bit_alloc) {
+		gres_cnt = bit_size(node_specs->gres_bit_alloc);
+		return gres_cnt;
+	}
+
+	/* This logic should be redundant */
+	if (node_specs->topo_gres_bitmap && node_specs->topo_gres_bitmap[0]) {
+		gres_cnt = bit_size(node_specs->topo_gres_bitmap[0]);
+		return gres_cnt;
+	}
+
+	/* This logic should also be redundant */
+	gres_cnt = 0;
+	for (i = 0; i < node_specs->topo_cnt; i++)
+		gres_cnt += node_specs->topo_gres_cnt_avail[i];
+	return gres_cnt;
+}
+
+/*
+ * Make final GRES selection for the job
+ * sock_gres_list IN - per-socket GRES details, one record per allocated node
+ * job_id IN - job ID for logging
+ * job_res IN - job resource allocation
+ * overcommit IN - job's ability to overcommit resources
+ * tres_mc_ptr IN - job's multi-core options
+ * node_table_ptr IN - slurmctld's node records
+ * RET SLURM_SUCCESS or error code
+ */
+extern int gres_plugin_job_core_filter4(List *sock_gres_list, uint32_t job_id,
+					struct job_resources *job_res,
+					uint8_t overcommit,
+					gres_mc_data_t *tres_mc_ptr,
+					struct node_record *node_table_ptr)
+{
+	ListIterator sock_gres_iter;
+	sock_gres_t *sock_gres;
+	gres_job_state_t *job_specs;
+	gres_node_state_t *node_specs;
+	int i, i_first, i_last, node_inx = -1, gres_cnt;
+	int node_cnt, rem_node_cnt;
+	int job_fini = -1;	/* -1: not applicable, 0: more work, 1: fini */
+	uint32_t **tasks_per_node_socket = NULL;
+
+	if (!job_res || !job_res->node_bitmap)
+		return SLURM_ERROR;
+
+	node_cnt = bit_size(job_res->node_bitmap);
+	rem_node_cnt = bit_set_count(job_res->node_bitmap);
+	i_first = bit_ffs(job_res->node_bitmap);
+	if (i_first != -1)
+		i_last  = bit_fls(job_res->node_bitmap);
+	else
+		i_last = -2;
+	for (i = i_first; i <= i_last; i++) {
+		if (!bit_test(job_res->node_bitmap, i))
+			continue;
+		sock_gres_iter =
+			list_iterator_create(sock_gres_list[++node_inx]);
+		while ((sock_gres = (sock_gres_t *) list_next(sock_gres_iter))){
+			job_specs = sock_gres->job_specs;
+			node_specs = sock_gres->node_specs;
+			if (!job_specs || !node_specs)
+				continue;
+			if (job_specs->gres_per_task &&	/* Data needed */
+			    !tasks_per_node_socket) {	/* Not built yet */
+				tasks_per_node_socket =
+					_build_tasks_per_node_sock(job_res,
+								overcommit,
+								tres_mc_ptr,
+								node_table_ptr);
+			}
+			if (job_specs->total_node_cnt == 0) {
+				job_specs->total_node_cnt = node_cnt;
+				job_specs->total_gres = 0;
+			}
+			if (!job_specs->gres_cnt_node_select) {
+				job_specs->gres_cnt_node_select =
+					xmalloc(sizeof(uint64_t) * node_cnt);
+			}
+
+			if (node_specs->topo_cnt == 0) {
+				/* No topology, just set a count */
+				if (job_specs->gres_per_node) {
+					job_specs->gres_cnt_node_select[i] =
+						job_specs->gres_per_node;
+				} else if (job_specs->gres_per_socket) {
+					job_specs->gres_cnt_node_select[i] =
+						job_specs->gres_per_socket;
+					job_specs->gres_cnt_node_select[i] *=
+						_get_sock_cnt(job_res, i,
+							      node_inx);
+				} else if (job_specs->gres_per_task) {
+					job_specs->gres_cnt_node_select[i] =
+						job_specs->gres_per_task;
+					job_specs->gres_cnt_node_select[i] *=
+						_get_task_cnt_node(
+						tasks_per_node_socket, i,
+						sock_gres->sock_cnt);
+				} else if (job_specs->gres_per_job) {
+					job_specs->gres_cnt_node_select[i] =
+						_get_job_cnt(sock_gres,
+							     node_specs,
+							     rem_node_cnt--);
+				}
+				job_specs->total_gres +=
+					job_specs->gres_cnt_node_select[i];
+				continue;
+			}
+
+			/* Working with topology, need to pick specific GRES */
+			if (!job_specs->gres_bit_select) {
+				job_specs->gres_bit_select =
+					xmalloc(sizeof(bitstr_t *) * node_cnt);
+			}
+			gres_cnt = _get_gres_node_cnt(node_specs, node_inx);
+			job_specs->gres_bit_select[i] = bit_alloc(gres_cnt);
+
+			if (job_specs->gres_per_node) {
+				_set_node_bits(job_res, i, node_inx,
+					       sock_gres, job_id, tres_mc_ptr);
+			} else if (job_specs->gres_per_socket) {
+				_set_sock_bits(job_res, i, node_inx,
+					       sock_gres, job_id, tres_mc_ptr);
+			} else if (job_specs->gres_per_task) {
+				_set_task_bits(job_res, i, node_inx,
+					       sock_gres, job_id, tres_mc_ptr,
+					       tasks_per_node_socket);
+			} else if (job_specs->gres_per_job) {
+				job_fini = _set_job_bits1(job_res, i, node_inx,
+					       rem_node_cnt--, sock_gres,
+					       job_id, tres_mc_ptr);
+			} else {
+				error("cons_tres: %s job %u job_spec lacks GRES counter",
+				      __func__, job_id);
+			}
+			if (job_fini == -1) {
+				/*
+				 * _set_job_bits1() updates total_gres counter,
+				 * this handle other cases
+				 */
+				job_specs->total_gres +=
+					job_specs->gres_cnt_node_select[i];
+			}
+		}
+		list_iterator_destroy(sock_gres_iter);
+	}
+
+	if (job_fini == 0) {
+		/* Need more GRES to satisfy gres-per-job option with bitmaps */
+		node_inx = -1;
+		for (i = i_first; i <= i_last; i++) {
+			if (!bit_test(job_res->node_bitmap, i))
+				continue;
+			sock_gres_iter =
+				list_iterator_create(sock_gres_list[++node_inx]);
+			while ((sock_gres = (sock_gres_t *)
+					    list_next(sock_gres_iter))) {
+				job_specs = sock_gres->job_specs;
+				node_specs = sock_gres->node_specs;
+				if (!job_specs || !node_specs)
+					continue;
+				job_fini = _set_job_bits2(job_res, i, node_inx,
+							  sock_gres, job_id,
+							  tres_mc_ptr);
+				if (job_fini == 1)
+					break;
+			}
+			list_iterator_destroy(sock_gres_iter);
+			if (job_fini == 1)
+				break;
+		}
+		if (job_fini == 0) {
+			error("cons_tres: %s job %u failed to satisfy gres-per-job counter",
+			      __func__, job_id);
+		}
+	}
+	_free_tasks_per_node_sock(tasks_per_node_socket, node_cnt);
+
+	return SLURM_SUCCESS;
+}
+
+/*
+ * Determine if the job GRES specification includes a mem-per-tres specification
+ * RET largest mem-per-tres specification found
+ */
+extern uint64_t gres_plugin_job_mem_max(List job_gres_list)
+{
+	ListIterator job_gres_iter;
+	gres_state_t *job_gres_ptr;
+	gres_job_state_t *job_data_ptr;
+	uint64_t mem_max = 0, mem_per_gres;
+
+	if (!job_gres_list)
+		return 0;
+
+	job_gres_iter = list_iterator_create(job_gres_list);
+	while ((job_gres_ptr = (gres_state_t *) list_next(job_gres_iter))) {
+		job_data_ptr = (gres_job_state_t *) job_gres_ptr->gres_data;
+		if (job_data_ptr->mem_per_gres)
+			mem_per_gres = job_data_ptr->mem_per_gres;
+		else
+			mem_per_gres = job_data_ptr->def_mem_per_gres;
+		mem_max = MAX(mem_max, mem_per_gres);
+	}
+	list_iterator_destroy(job_gres_iter);
+
+	return mem_max;
+}
+
+/*
+ * Set per-node memory limits based upon GRES assignments
+ * RET TRUE if mem-per-tres specification used to set memory limits
+ */
+extern bool gres_plugin_job_mem_set(List job_gres_list,
+				    job_resources_t *job_res)
+{
+	ListIterator job_gres_iter;
+	gres_state_t *job_gres_ptr;
+	gres_job_state_t *job_data_ptr;
+	bool rc = false, first_set = true;
+	uint64_t gres_cnt, mem_size, mem_per_gres;
+	int i, i_first, i_last, node_off;
+
+	if (!job_gres_list)
+		return false;
+
+	i_first = bit_ffs(job_res->node_bitmap);
+	if (i_first < 0)
+		return false;
+	i_last = bit_fls(job_res->node_bitmap);
+
+	job_gres_iter = list_iterator_create(job_gres_list);
+	while ((job_gres_ptr = (gres_state_t *) list_next(job_gres_iter))) {
+		job_data_ptr = (gres_job_state_t *) job_gres_ptr->gres_data;
+		if (job_data_ptr->mem_per_gres)
+			mem_per_gres = job_data_ptr->mem_per_gres;
+		else
+			mem_per_gres = job_data_ptr->def_mem_per_gres;
+		if ((mem_per_gres == 0) || !job_data_ptr->gres_cnt_node_select)
+			continue;
+		rc = true;
+		node_off = -1;
+		for (i = i_first; i <= i_last; i++) {
+			if (!bit_test(job_res->node_bitmap, i))
+				continue;
+			node_off++;
+			gres_cnt = job_data_ptr->gres_cnt_node_select[i];
+			mem_size = mem_per_gres * gres_cnt;
+			if (first_set) {
+				job_res->memory_allocated[node_off] = mem_size;
+			} else {
+				job_res->memory_allocated[node_off] = MAX(
+					job_res->memory_allocated[node_off],
+					mem_size);
+			}
+		}
+		first_set = false;
+	}
+	list_iterator_destroy(job_gres_iter);
+
+	return rc;
+}
+
+/*
+ * Determine the minimum number of CPUs required to satify the job's GRES
+ *	request (based upon total GRES times cpus_per_gres value)
+ * node_count IN - count of nodes in job allocation
+ * sockets_per_node IN - count of sockets per node in job allocation
+ * task_count IN - count of tasks in job allocation
+ * job_gres_list IN - job GRES specification
+ * RET count of required CPUs for the job
+ */
+extern int gres_plugin_job_min_cpus(uint32_t node_count,
+				    uint32_t sockets_per_node,
+				    uint32_t task_count,
+				    List job_gres_list)
+{
+	ListIterator job_gres_iter;
+	gres_state_t *job_gres_ptr;
+	gres_job_state_t  *job_data_ptr;
+	int tmp, min_cpus = 0;
+	uint16_t cpus_per_gres;
+
+	if (!job_gres_list || (list_count(job_gres_list) == 0))
+		return 0;
+
+	job_gres_iter = list_iterator_create(job_gres_list);
+	while ((job_gres_ptr = (gres_state_t *) list_next(job_gres_iter))) {
+		uint64_t total_gres = 0;
+		job_data_ptr = (gres_job_state_t *) job_gres_ptr->gres_data;
+		if (job_data_ptr->cpus_per_gres)
+			cpus_per_gres = job_data_ptr->cpus_per_gres;
+		else
+			cpus_per_gres = job_data_ptr->def_cpus_per_gres;
+		if (cpus_per_gres == 0)
+			continue;
+		if (job_data_ptr->gres_per_job) {
+			total_gres = job_data_ptr->gres_per_job;
+		} else if (job_data_ptr->gres_per_node) {
+			total_gres = job_data_ptr->gres_per_node *
+				     node_count;
+		} else if (job_data_ptr->gres_per_socket) {
+			total_gres = job_data_ptr->gres_per_socket *
+				     node_count * sockets_per_node;
+		} else if (job_data_ptr->gres_per_task) {
+			total_gres = job_data_ptr->gres_per_task * task_count;
+		} else
+			continue;
+		tmp = cpus_per_gres * total_gres;
+		min_cpus = MAX(min_cpus, tmp);
+	}
+	list_iterator_destroy(job_gres_iter);
+	return min_cpus;
+}
+
+/*
+ * Determine the minimum number of CPUs required to satify the job's GRES
+ *	request on one node
+ * sockets_per_node IN - count of sockets per node in job allocation
+ * tasks_per_node IN - count of tasks per node in job allocation
+ * job_gres_list IN - job GRES specification
+ * RET count of required CPUs for the job
+ */
+extern int gres_plugin_job_min_cpu_node(uint32_t sockets_per_node,
+					uint32_t tasks_per_node,
+					List job_gres_list)
+{
+	ListIterator job_gres_iter;
+	gres_state_t *job_gres_ptr;
+	gres_job_state_t  *job_data_ptr;
+	int tmp, min_cpus = 0;
+	uint16_t cpus_per_gres;
+
+	if (!job_gres_list || (list_count(job_gres_list) == 0))
+		return 0;
+
+	job_gres_iter = list_iterator_create(job_gres_list);
+	while ((job_gres_ptr = (gres_state_t *) list_next(job_gres_iter))) {
+		uint64_t total_gres = 0;
+		job_data_ptr = (gres_job_state_t *) job_gres_ptr->gres_data;
+		if (job_data_ptr->cpus_per_gres)
+			cpus_per_gres = job_data_ptr->cpus_per_gres;
+		else
+			cpus_per_gres = job_data_ptr->def_cpus_per_gres;
+		if (cpus_per_gres == 0)
+			continue;
+		if (job_data_ptr->gres_per_node) {
+			total_gres = job_data_ptr->gres_per_node;
+		} else if (job_data_ptr->gres_per_socket) {
+			total_gres = job_data_ptr->gres_per_socket *
+				     sockets_per_node;
+		} else if (job_data_ptr->gres_per_task) {
+			total_gres = job_data_ptr->gres_per_task *
+				     tasks_per_node;
+		} else
+			total_gres = 1;
+		tmp = cpus_per_gres * total_gres;
+		min_cpus = MAX(min_cpus, tmp);
+	}
+	return min_cpus;
 }
 
 /*
@@ -5065,18 +7261,19 @@ extern void gres_plugin_job_clear(List job_gres_list)
 		xfree(job_state_ptr->gres_bit_alloc);
 		xfree(job_state_ptr->gres_bit_step_alloc);
 		xfree(job_state_ptr->gres_cnt_step_alloc);
+		xfree(job_state_ptr->gres_cnt_node_alloc);
 		job_state_ptr->node_cnt = 0;
 	}
 	list_iterator_destroy(job_gres_iter);
 	slurm_mutex_unlock(&gres_context_lock);
 }
 
-static int _job_alloc(void *job_gres_data, void *node_gres_data,
-		      int node_cnt, int node_offset, char *gres_name,
+static int _job_alloc(void *job_gres_data, void *node_gres_data, int node_cnt,
+		      int node_index, int node_offset, char *gres_name,
 		      uint32_t job_id, char *node_name,
 		      bitstr_t *core_bitmap)
 {
-	int j, k, sz1, sz2;
+	int j, sz1, sz2;
 	uint64_t gres_cnt, i;
 	gres_job_state_t  *job_gres_ptr  = (gres_job_state_t *)  job_gres_data;
 	gres_node_state_t *node_gres_ptr = (gres_node_state_t *) node_gres_data;
@@ -5099,16 +7296,18 @@ static int _job_alloc(void *job_gres_data, void *node_gres_data,
 	if (job_gres_ptr->node_cnt == 0) {
 		job_gres_ptr->node_cnt = node_cnt;
 		if (job_gres_ptr->gres_bit_alloc) {
-			error("gres/%s: job %u node_cnt==0 and bit_alloc is set",
+			error("gres/%s: job %u node_cnt==0 and gres_bit_alloc is set",
 			      gres_name, job_id);
 			xfree(job_gres_ptr->gres_bit_alloc);
 		}
-		job_gres_ptr->gres_bit_alloc = xmalloc(sizeof(bitstr_t *) *
-						       node_cnt);
-		if (!job_gres_ptr->gres_cnt_node_alloc) {
-			job_gres_ptr->gres_cnt_node_alloc =
-				xmalloc(sizeof(uint64_t) * node_cnt);
-		}
+	}
+	if (!job_gres_ptr->gres_bit_alloc) {
+		job_gres_ptr->gres_bit_alloc =
+			xmalloc(sizeof(bitstr_t *) * node_cnt);
+	}
+	if (!job_gres_ptr->gres_cnt_node_alloc) {
+		job_gres_ptr->gres_cnt_node_alloc =
+			xmalloc(sizeof(uint64_t) * node_cnt);
 	}
 	/*
 	 * These next 2 checks were added long before job resizing was allowed.
@@ -5128,12 +7327,44 @@ static int _job_alloc(void *job_gres_data, void *node_gres_data,
 	}
 
 	/*
+	 * select/cons_tres pre-selects the resources and we just need to update
+	 * the data structures to reflect the selected GRES.
+	 */
+	if (job_gres_ptr->total_node_cnt &&
+	    (job_gres_ptr->gres_cnt_node_alloc	||
+	     job_gres_ptr->gres_bit_alloc	||
+	     job_gres_ptr->gres_bit_select	||
+	     job_gres_ptr->gres_cnt_node_select)) {
+		/* Resuming job */
+		if (job_gres_ptr->gres_cnt_node_alloc[node_offset]) {
+			gres_cnt = job_gres_ptr->
+				   gres_cnt_node_alloc[node_offset];
+		} else if (job_gres_ptr->gres_bit_alloc[node_offset]) {
+			gres_cnt = bit_set_count(
+				    job_gres_ptr->gres_bit_alloc[node_offset]);
+		/* Using pre-selected GRES */
+		} else if (job_gres_ptr->gres_cnt_node_select &&
+		    job_gres_ptr->gres_cnt_node_select[node_index]) {
+			gres_cnt = job_gres_ptr->
+				   gres_cnt_node_select[node_index];
+		} else if (job_gres_ptr->gres_bit_select &&
+			   job_gres_ptr->gres_bit_select[node_index]) {
+			gres_cnt = bit_set_count(
+				    job_gres_ptr->gres_bit_select[node_index]);
+		} else {
+			error("gres/%s: job %u node %s no resources selected",
+			      gres_name, job_id, node_name);
+			return SLURM_ERROR;
+		}
+	} else {
+		gres_cnt = job_gres_ptr->gres_per_node;
+	}
+
+	/*
 	 * Check that sufficient resources exist on this node
 	 */
-	gres_cnt = job_gres_ptr->gres_per_node;
 	job_gres_ptr->gres_cnt_node_alloc[node_offset] = gres_cnt;
 	i = node_gres_ptr->gres_cnt_alloc + gres_cnt;
-
 	if (i > node_gres_ptr->gres_cnt_avail) {
 		error("gres/%s: job %u node %s overallocated resources by %"
 		      PRIu64", (%"PRIu64" > %"PRIu64")",
@@ -5158,7 +7389,7 @@ static int _job_alloc(void *job_gres_data, void *node_gres_data,
 	}
 
 	/*
-	 * Select the specific resources to use for this job.
+	 * Select and/or allocate specific resources for this job.
 	 */
 	if (job_gres_ptr->gres_bit_alloc[node_offset]) {
 		/* Resuming a suspended job, resources already allocated */
@@ -5181,6 +7412,53 @@ static int _job_alloc(void *job_gres_data, void *node_gres_data,
 					node_gres_ptr->gres_cnt_alloc++;
 				}
 			}
+		}
+	} else if (job_gres_ptr->total_node_cnt &&
+		   job_gres_ptr->gres_bit_select &&
+		   job_gres_ptr->gres_bit_select[node_index] &&
+		   job_gres_ptr->gres_cnt_node_select) {
+		/* Specific GRES already selected, update the node record */
+		bool job_mod = false;
+		sz1 = bit_size(job_gres_ptr->gres_bit_select[node_index]);
+		sz2 = bit_size(node_gres_ptr->gres_bit_alloc);
+		if (sz1 > sz2) {
+			error("gres/%s: job %u node %s gres bitmap size bad (%d > %d)",
+			      gres_name, job_id, node_name, sz1, sz2);
+			job_gres_ptr->gres_bit_select[node_index] =
+				bit_realloc(
+				job_gres_ptr->gres_bit_select[node_index], sz2);
+			job_mod = true;
+		} else if (sz1 < sz2) {
+			error("gres/%s: job %u node %s gres bitmap size bad (%d < %d)",
+			      gres_name, job_id, node_name, sz1, sz2);
+			job_gres_ptr->gres_bit_select[node_index] =
+				bit_realloc(
+				job_gres_ptr->gres_bit_select[node_index], sz2);
+		}
+		if (bit_overlap(job_gres_ptr->gres_bit_select[node_index],
+				node_gres_ptr->gres_bit_alloc)) {
+			error("gres/%s: job %u node %s gres bitmap overlap",
+			      gres_name, job_id, node_name);
+			bit_and_not(job_gres_ptr->gres_bit_select[node_index],
+				    node_gres_ptr->gres_bit_alloc);
+		}
+		job_gres_ptr->gres_bit_alloc[node_offset] =
+			bit_copy(job_gres_ptr->gres_bit_select[node_index]);
+		job_gres_ptr->gres_cnt_node_alloc[node_offset] =
+			job_gres_ptr->gres_cnt_node_select[node_index];
+		if (!node_gres_ptr->gres_bit_alloc) {
+			node_gres_ptr->gres_bit_alloc =
+				bit_copy(job_gres_ptr->
+					 gres_bit_alloc[node_offset]);
+		} else {
+			bit_or(node_gres_ptr->gres_bit_alloc,
+			       job_gres_ptr->gres_bit_alloc[node_offset]);
+		}
+		if (job_mod) {
+			node_gres_ptr->gres_cnt_alloc =
+				bit_set_count(node_gres_ptr->gres_bit_alloc);
+		} else {
+			node_gres_ptr->gres_cnt_alloc += gres_cnt;
 		}
 	} else if (node_gres_ptr->gres_bit_alloc) {
 		job_gres_ptr->gres_bit_alloc[node_offset] =
@@ -5234,11 +7512,10 @@ static int _job_alloc(void *job_gres_data, void *node_gres_data,
 			gres_cnt--;
 		}
 	} else {
-		node_gres_ptr->gres_cnt_alloc += job_gres_ptr->gres_per_node;
+		node_gres_ptr->gres_cnt_alloc += gres_cnt;
 	}
 
-	if (job_gres_ptr->gres_bit_alloc &&
-	    job_gres_ptr->gres_bit_alloc[node_offset] &&
+	if (job_gres_ptr->gres_bit_alloc[node_offset] &&
 	    node_gres_ptr->topo_gres_bitmap &&
 	    node_gres_ptr->topo_gres_cnt_alloc) {
 		for (i = 0; i < node_gres_ptr->topo_cnt; i++) {
@@ -5270,6 +7547,7 @@ static int _job_alloc(void *job_gres_data, void *node_gres_data,
 				     node_gres_ptr->type_id[j]))
 					continue;
 				node_gres_ptr->type_cnt_alloc[j] += gres_cnt;
+				break;
 			}
 		}
 		type_array_updated = true;
@@ -5284,10 +7562,28 @@ static int _job_alloc(void *job_gres_data, void *node_gres_data,
 			len = MIN(len, node_gres_ptr->gres_cnt_config);
 		}
 		for (i = 0; i < len; i++) {
+			gres_cnt = 0;
 			if (!bit_test(job_gres_ptr->
 				      gres_bit_alloc[node_offset], i))
 				continue;
-			node_gres_ptr->topo_gres_cnt_alloc[i]++;
+			/*
+			 * NOTE: Immediately after slurmctld restart and before
+			 * the node's registration, the GRES type and topology
+			 * information will not be available and we will be
+			 * unable to update topo_gres_cnt_alloc or
+			 * type_cnt_alloc. This results in some incorrect
+			 * internal bookkeeping, but does not cause failures
+			 * in terms of allocating GRES to jobs.
+			 */
+			for (j = 0; j < node_gres_ptr->topo_cnt; j++) {
+				if (node_gres_ptr->topo_gres_bitmap &&
+				    node_gres_ptr->topo_gres_bitmap[j] &&
+				    bit_test(node_gres_ptr->topo_gres_bitmap[j],
+					     i)) {
+					node_gres_ptr->topo_gres_cnt_alloc[i]++;
+					gres_cnt++;
+				}
+			}
 			if ((node_gres_ptr->type_cnt == 0) ||
 			    (node_gres_ptr->topo_type_name == NULL) ||
 			    (node_gres_ptr->topo_type_name[i] == NULL))
@@ -5297,7 +7593,8 @@ static int _job_alloc(void *job_gres_data, void *node_gres_data,
 				    (node_gres_ptr->topo_type_id[i] !=
 				     node_gres_ptr->type_id[j]))
 					continue;
-				node_gres_ptr->type_cnt_alloc[j]++;
+				node_gres_ptr->type_cnt_alloc[j] += gres_cnt;
+				break;
 			}
 		}
 		type_array_updated = true;
@@ -5324,6 +7621,7 @@ static int _job_alloc(void *job_gres_data, void *node_gres_data,
 	if (!type_array_updated && job_gres_ptr->type_name) {
 		gres_cnt = job_gres_ptr->gres_per_node;
 		for (j = 0; j < node_gres_ptr->type_cnt; j++) {
+			int64_t k;
 			if (!node_gres_ptr->type_name[j] ||
 			    (job_gres_ptr->type_id !=
 			     node_gres_ptr->type_id[j]))
@@ -5347,7 +7645,8 @@ static int _job_alloc(void *job_gres_data, void *node_gres_data,
  * IN node_gres_list - node's gres_list built by
  *		       gres_plugin_node_config_validate()
  * IN node_cnt    - total number of nodes originally allocated to the job
- * IN node_offset - zero-origin index to the node of interest
+ * IN node_index  - zero-origin global node index
+ * IN node_offset - zero-origin index in job allocaiton to the node of interest
  * IN job_id      - job's ID (for logging)
  * IN node_name   - name of the node (for logging)
  * IN core_bitmap - cores allocated to this job on this node (NULL if not
@@ -5355,7 +7654,7 @@ static int _job_alloc(void *job_gres_data, void *node_gres_data,
  * RET SLURM_SUCCESS or error code
  */
 extern int gres_plugin_job_alloc(List job_gres_list, List node_gres_list,
-				 int node_cnt, int node_offset,
+				 int node_cnt, int node_index, int node_offset,
 				 uint32_t job_id, char *node_name,
 				 bitstr_t *core_bitmap)
 {
@@ -5404,7 +7703,7 @@ extern int gres_plugin_job_alloc(List job_gres_list, List node_gres_list,
 		}
 
 		rc2 = _job_alloc(job_gres_ptr->gres_data,
-				 node_gres_ptr->gres_data, node_cnt,
+				 node_gres_ptr->gres_data, node_cnt, node_index,
 				 node_offset, gres_context[i].gres_name,
 				 job_id, node_name, core_bitmap);
 		if (rc2 != SLURM_SUCCESS)
@@ -5418,7 +7717,7 @@ extern int gres_plugin_job_alloc(List job_gres_list, List node_gres_list,
 
 static int _job_dealloc(void *job_gres_data, void *node_gres_data,
 			int node_offset, char *gres_name, uint32_t job_id,
-			char *node_name)
+			char *node_name, bool old_job)
 {
 	int i, j, len, sz1, sz2;
 	gres_job_state_t  *job_gres_ptr  = (gres_job_state_t *)  job_gres_data;
@@ -5462,9 +7761,11 @@ static int _job_dealloc(void *job_gres_data, void *node_gres_data,
 				continue;
 			}
 			bit_clear(node_gres_ptr->gres_bit_alloc, i);
-			/* NOTE: Do not clear bit from
+			/*
+			 * NOTE: Do not clear bit from
 			 * job_gres_ptr->gres_bit_alloc[node_offset]
-			 * since this may only be an emulated deallocate */
+			 * since this may only be an emulated deallocate
+			 */
 			if (node_gres_ptr->gres_cnt_alloc)
 				node_gres_ptr->gres_cnt_alloc--;
 			else {
@@ -5504,6 +7805,8 @@ static int _job_dealloc(void *job_gres_data, void *node_gres_data,
 			if (node_gres_ptr->topo_gres_cnt_alloc[i] >= gres_cnt) {
 				node_gres_ptr->topo_gres_cnt_alloc[i] -=
 					gres_cnt;
+			} else if (old_job) {
+				node_gres_ptr->topo_gres_cnt_alloc[i] = 0;
 			} else {
 				error("gres/%s: job %u dealloc node %s topo "
 				      "gres count underflow "
@@ -5527,6 +7830,8 @@ static int _job_dealloc(void *job_gres_data, void *node_gres_data,
 				    gres_cnt) {
 					node_gres_ptr->type_cnt_alloc[j] -=
 						gres_cnt;
+				} else if (old_job) {
+					node_gres_ptr->type_cnt_alloc[j] = 0;
 				} else {
 					error("gres/%s: job %u dealloc node %s "
 					      "type %s gres count underflow "
@@ -5594,11 +7899,16 @@ static int _job_dealloc(void *job_gres_data, void *node_gres_data,
  * IN node_offset - zero-origin index to the node of interest
  * IN job_id      - job's ID (for logging)
  * IN node_name   - name of the node (for logging)
+ * IN old_job     - true if job started before last slurmctld reboot.
+ *		    Immediately after slurmctld restart and before the node's
+ *		    registration, the GRES type and topology. This results in
+ *		    some incorrect internal bookkeeping, but does not cause
+ *		    failures in terms of allocating GRES to jobs.
  * RET SLURM_SUCCESS or error code
  */
 extern int gres_plugin_job_dealloc(List job_gres_list, List node_gres_list,
 				   int node_offset, uint32_t job_id,
-				   char *node_name)
+				   char *node_name, bool old_job)
 {
 	int i, rc, rc2;
 	ListIterator job_gres_iter,  node_gres_iter;
@@ -5647,7 +7957,7 @@ extern int gres_plugin_job_dealloc(List job_gres_list, List node_gres_list,
 
 		rc2 = _job_dealloc(job_gres_ptr->gres_data,
 				   node_gres_ptr->gres_data, node_offset,
-				   gres_name, job_id, node_name);
+				   gres_name, job_id, node_name, old_job);
 		if (rc2 != SLURM_SUCCESS)
 			rc = rc2;
 	}
@@ -5672,6 +7982,7 @@ extern void gres_plugin_job_merge(List from_job_gres_list,
 				  List to_job_gres_list,
 				  bitstr_t *to_job_node_bitmap)
 {
+	static int select_hetero = -1;
 	ListIterator gres_iter;
 	gres_state_t *gres_ptr, *gres_ptr2;
 	gres_job_state_t *gres_job_ptr, *gres_job_ptr2;
@@ -5679,7 +7990,23 @@ extern void gres_plugin_job_merge(List from_job_gres_list,
 	int i_first, i_last, i;
 	int from_inx, to_inx, new_inx;
 	bitstr_t **new_gres_bit_alloc, **new_gres_bit_step_alloc;
-	uint64_t *new_gres_cnt_step_alloc;
+	uint64_t *new_gres_cnt_step_alloc, *new_gres_cnt_node_alloc;
+
+	if (select_hetero == -1) {
+		/*
+		 * Determine if the select plugin supports heterogenous
+		 * GRES allocations (count differ by node): 1=yes, 0=no
+		 */
+		char *select_type = slurm_get_select_type();
+		if (select_type &&
+		    (strstr(select_type, "cons_tres") ||
+		     (strstr(select_type, "cray") &&
+		      (slurm_get_select_type_param() & CR_OTHER_CONS_TRES)))) {
+			select_hetero = 1;
+		} else
+			select_hetero = 0;
+		xfree(select_type);
+	}
 
 	(void) gres_plugin_init();
 	new_node_cnt = bit_set_count(from_job_node_bitmap) +
@@ -5691,7 +8018,7 @@ extern void gres_plugin_job_merge(List from_job_gres_list,
 	i_last  = MAX(bit_fls(from_job_node_bitmap),
 		      bit_fls(to_job_node_bitmap));
 	if (i_last == -1) {
-		error("gres_plugin_job_merge: node_bitmaps are empty");
+		error("%s: node_bitmaps are empty", __func__);
 		return;
 	}
 
@@ -5705,6 +8032,8 @@ extern void gres_plugin_job_merge(List from_job_gres_list,
 		gres_job_ptr = (gres_job_state_t *) gres_ptr->gres_data;
 		new_gres_bit_alloc = xmalloc(sizeof(bitstr_t *) *
 					     new_node_cnt);
+		new_gres_cnt_node_alloc = xmalloc(sizeof(uint64_t) *
+						  new_node_cnt);
 		new_gres_bit_step_alloc = xmalloc(sizeof(bitstr_t *) *
 						  new_node_cnt);
 		new_gres_cnt_step_alloc = xmalloc(sizeof(uint64_t) *
@@ -5729,6 +8058,11 @@ extern void gres_plugin_job_merge(List from_job_gres_list,
 						gres_job_ptr->
 						gres_bit_alloc[to_inx];
 				}
+				if (gres_job_ptr->gres_cnt_node_alloc) {
+					new_gres_cnt_node_alloc[new_inx] =
+						gres_job_ptr->
+						gres_cnt_node_alloc[to_inx];
+				}
 				if (gres_job_ptr->gres_bit_step_alloc) {
 					new_gres_bit_step_alloc[new_inx] =
 						gres_job_ptr->
@@ -5744,6 +8078,8 @@ extern void gres_plugin_job_merge(List from_job_gres_list,
 		gres_job_ptr->node_cnt = new_node_cnt;
 		xfree(gres_job_ptr->gres_bit_alloc);
 		gres_job_ptr->gres_bit_alloc = new_gres_bit_alloc;
+		xfree(gres_job_ptr->gres_cnt_node_alloc);
+		gres_job_ptr->gres_cnt_node_alloc = new_gres_cnt_node_alloc;
 		xfree(gres_job_ptr->gres_bit_step_alloc);
 		gres_job_ptr->gres_bit_step_alloc = new_gres_bit_step_alloc;
 		xfree(gres_job_ptr->gres_cnt_step_alloc);
@@ -5751,8 +8087,10 @@ extern void gres_plugin_job_merge(List from_job_gres_list,
 	}
 	list_iterator_destroy(gres_iter);
 
-	/* Step two - Merge the gres information from the "from" job into the
-	 * existing gres information for the "to" job */
+	/*
+	 * Step two - Merge the gres information from the "from" job into the
+	 * existing gres information for the "to" job
+	 */
 step2:	if (!from_job_gres_list)
 		goto step3;
 	if (!to_job_gres_list) {
@@ -5787,6 +8125,8 @@ step2:	if (!from_job_gres_list)
 			gres_job_ptr2->node_cnt = new_node_cnt;
 			gres_job_ptr2->gres_bit_alloc =
 				xmalloc(sizeof(bitstr_t *) * new_node_cnt);
+			gres_job_ptr2->gres_cnt_node_alloc =
+				xmalloc(sizeof(uint64_t) * new_node_cnt);
 			gres_job_ptr2->gres_bit_step_alloc =
 				xmalloc(sizeof(bitstr_t *) * new_node_cnt);
 			gres_job_ptr2->gres_cnt_step_alloc =
@@ -5809,16 +8149,20 @@ step2:	if (!from_job_gres_list)
 			if (from_match) {
 				if (!gres_job_ptr->gres_bit_alloc) {
 					;
-				} else if (gres_job_ptr2->
+				} else if (select_hetero &&
+					   gres_job_ptr2->
+					   gres_bit_alloc[new_inx] &&
+					   gres_job_ptr->gres_bit_alloc &&
+					   gres_job_ptr->
 					   gres_bit_alloc[new_inx]) {
-					/* Do not merge GRES allocations on
-					 * a node, just keep original job's */
-#if 0
+					/* Merge job's GRES bitmaps */
 					bit_or(gres_job_ptr2->
 					       gres_bit_alloc[new_inx],
 					       gres_job_ptr->
 					       gres_bit_alloc[from_inx]);
-#endif
+				} else if (gres_job_ptr2->
+					   gres_bit_alloc[new_inx]) {
+					/* Keep original job's GRES bitmap */
 				} else {
 					gres_job_ptr2->gres_bit_alloc[new_inx] =
 						gres_job_ptr->
@@ -5826,6 +8170,29 @@ step2:	if (!from_job_gres_list)
 					gres_job_ptr->
 						gres_bit_alloc
 						[from_inx] = NULL;
+				}
+				if (!gres_job_ptr->gres_bit_alloc) {
+					;
+				} else if (select_hetero &&
+					   gres_job_ptr2->
+					   gres_cnt_node_alloc[new_inx] &&
+					   gres_job_ptr->gres_cnt_node_alloc &&
+					   gres_job_ptr->
+					   gres_cnt_node_alloc[new_inx]) {
+					gres_job_ptr2->
+						gres_cnt_node_alloc[new_inx] +=
+						gres_job_ptr->
+						gres_cnt_node_alloc[from_inx];
+				} else if (gres_job_ptr2->
+					   gres_cnt_node_alloc[new_inx]) {
+					/* Keep original job's GRES bitmap */
+				} else {
+					gres_job_ptr2->
+						gres_cnt_node_alloc[new_inx] =
+						gres_job_ptr->
+						gres_cnt_node_alloc[from_inx];
+					gres_job_ptr->
+						gres_cnt_node_alloc[from_inx]=0;
 				}
 				if (gres_job_ptr->gres_cnt_step_alloc &&
 				    gres_job_ptr->
@@ -5950,12 +8317,25 @@ static void _job_state_log(void *gres_data, uint32_t job_id, uint32_t plugin_id)
 		return;
 	if (gres_ptr->gres_bit_alloc == NULL)
 		info("  gres_bit_alloc:NULL");
+	if (gres_ptr->gres_cnt_node_alloc == NULL)
+		info("  gres_cnt_node_alloc:NULL");
 	if (gres_ptr->gres_bit_step_alloc == NULL)
 		info("  gres_bit_step_alloc:NULL");
 	if (gres_ptr->gres_cnt_step_alloc == NULL)
 		info("  gres_cnt_step_alloc:NULL");
+	if (gres_ptr->gres_bit_select == NULL)
+		info("  gres_bit_select:NULL");
+	if (gres_ptr->gres_cnt_node_select == NULL)
+		info("  gres_cnt_node_select:NULL");
 
 	for (i = 0; i < gres_ptr->node_cnt; i++) {
+		if (gres_ptr->gres_cnt_node_alloc &&
+		    gres_ptr->gres_cnt_node_alloc[i]) {
+			info("  gres_cnt_node_alloc[%d]:%"PRIu64,
+			     i, gres_ptr->gres_cnt_node_alloc[i]);
+		} else if (gres_ptr->gres_cnt_node_alloc)
+			info("  gres_cnt_node_alloc[%d]:NULL", i);
+
 		if (gres_ptr->gres_bit_alloc && gres_ptr->gres_bit_alloc[i]) {
 			bit_fmt(tmp_str, sizeof(tmp_str),
 				gres_ptr->gres_bit_alloc[i]);
@@ -5975,6 +8355,24 @@ static void _job_state_log(void *gres_data, uint32_t job_id, uint32_t plugin_id)
 			info("  gres_cnt_step_alloc[%d]:%"PRIu64"", i,
 			     gres_ptr->gres_cnt_step_alloc[i]);
 		}
+	}
+
+	info("  total_node_cnt:%u", gres_ptr->total_node_cnt);
+	for (i = 0; i < gres_ptr->total_node_cnt; i++) {
+		if (gres_ptr->gres_cnt_node_select &&
+		    gres_ptr->gres_cnt_node_select[i]) {
+			info("  gres_cnt_node_select[%d]:%"PRIu64,
+			     i, gres_ptr->gres_cnt_node_select[i]);
+		} else if (gres_ptr->gres_cnt_node_select)
+			info("  gres_cnt_node_select[%d]:NULL", i);
+
+		if (gres_ptr->gres_bit_select &&
+		    gres_ptr->gres_bit_select[i]) {
+			bit_fmt(tmp_str, sizeof(tmp_str),
+				gres_ptr->gres_bit_select[i]);
+			info("  gres_bit_select[%d]:%s", i, tmp_str);
+		} else if (gres_ptr->gres_bit_select)
+			info("  gres_bit_select[%d]:NULL", i);
 	}
 }
 
@@ -6199,7 +8597,7 @@ static uint64_t _step_test(void *step_gres_data, void *job_gres_data,
 		return 0;
 	}
 
-//FIXME: Needs updating for new TRES fields
+//FIXME: Add step support for other GRES count specifications
 	if (job_gres_ptr->gres_cnt_step_alloc) {
 		uint64_t job_gres_avail = job_gres_ptr->gres_per_node;
 		if (!ignore_alloc) {
@@ -6346,8 +8744,7 @@ next:	if (prev_save_ptr[0] == '\0') {	/* Empty input token */
 			offset = sep2 - type + 1;
 			sep += offset;
 		} else {
-			my_rc = ESLURM_INVALID_GRES;
-			goto fini;
+			sep = NULL;
 		}
 	} else {
 		/* Count in this field, no type */
@@ -6358,6 +8755,10 @@ next:	if (prev_save_ptr[0] == '\0') {	/* Empty input token */
 	if (!sep) {
 		/* No type or explicit count. Count is 1 by default */
 		*cnt = 1;
+		if (comma)
+			prev_save_ptr += (comma + 1) - name;
+		else
+			prev_save_ptr += strlen(name);
 	} else if ((sep[0] >= '0') && (sep[0] <= '9')) {
 		value = strtoull(sep, &end_ptr, 10);
 		if (value == ULLONG_MAX) {
@@ -6428,6 +8829,8 @@ static void _validate_step_counts(List step_gres_list, List job_gres_list,
 	gres_job_state_t *job_gres_data;
 	gres_step_state_t *step_gres_data;
 	gres_key_t job_search_key;
+	uint16_t cpus_per_gres;
+	uint64_t mem_per_gres;
 
 	if (!step_gres_list || (list_count(step_gres_list) == 0))
 		return;
@@ -6452,10 +8855,12 @@ static void _validate_step_counts(List step_gres_list, List job_gres_list,
 			break;
 		}
 		job_gres_data = (gres_job_state_t *) job_gres_ptr->gres_data;
-		if (job_gres_data->cpus_per_gres &&
-		    step_gres_data->cpus_per_gres &&
-		    (job_gres_data->cpus_per_gres <
-		     step_gres_data->cpus_per_gres)) {
+		if (job_gres_data->cpus_per_gres)
+			cpus_per_gres = job_gres_data->cpus_per_gres;
+		else
+			cpus_per_gres = job_gres_data->def_cpus_per_gres;
+		if (cpus_per_gres && step_gres_data->cpus_per_gres &&
+		    (cpus_per_gres < step_gres_data->cpus_per_gres)) {
 			*rc = ESLURM_INVALID_GRES;
 			break;
 		}
@@ -6487,10 +8892,12 @@ static void _validate_step_counts(List step_gres_list, List job_gres_list,
 			*rc = ESLURM_INVALID_GRES;
 			break;
 		}
-		if (job_gres_data->mem_per_gres &&
-		    step_gres_data->mem_per_gres &&
-		    (job_gres_data->mem_per_gres <
-		     step_gres_data->mem_per_gres)) {
+		if (job_gres_data->mem_per_gres)
+			mem_per_gres = job_gres_data->mem_per_gres;
+		else
+			mem_per_gres = job_gres_data->def_mem_per_gres;
+		if (mem_per_gres && step_gres_data->mem_per_gres &&
+		    (mem_per_gres < step_gres_data->mem_per_gres)) {
 			*rc = ESLURM_INVALID_GRES;
 			break;
 		}
@@ -6963,9 +9370,6 @@ extern int gres_plugin_step_state_unpack(List *gres_list, Buf buffer,
 			unpack_bit_str_hex(&gres_step_ptr->node_in_use, buffer);
 			safe_unpack8(&has_file, buffer);
 			if (has_file) {
-				gres_step_ptr->gres_cnt_node_alloc =
-					xmalloc(sizeof(uint64_t) *
-						gres_step_ptr->node_cnt);
 				safe_unpack64_array(
 					&gres_step_ptr->gres_cnt_node_alloc,
 					&uint32_tmp, buffer);
@@ -7079,8 +9483,10 @@ extern uint64_t gres_plugin_step_count(List step_gres_list, char *gres_name)
 	return gres_cnt;
 }
 
-/* Given a GRES context index, return a bitmap representing those GRES
- * which are available from the CPUs current allocated to this process */
+/*
+ * Given a GRES context index, return a bitmap representing those GRES
+ * which are available from the CPUs current allocated to this process
+ */
 static bitstr_t * _get_usable_gres(int context_inx)
 {
 #ifdef __NetBSD__
@@ -7116,7 +9522,7 @@ static bitstr_t * _get_usable_gres(int context_inx)
 		if (gres_slurmd_conf->plugin_id !=
 		    gres_context[context_inx].plugin_id)
 			continue;
-		if (gres_inx + gres_slurmd_conf->count >= MAX_GRES_BITMAP) {
+		if ((gres_inx + gres_slurmd_conf->count) >= MAX_GRES_BITMAP) {
 			error("GRES %s bitmap overflow",gres_slurmd_conf->name);
 			continue;
 		}
@@ -7126,12 +9532,12 @@ static bitstr_t * _get_usable_gres(int context_inx)
 		} else {
 			i_last = bit_fls(gres_slurmd_conf->cpus_bitmap);
 			for (i = 0; i <= i_last; i++) {
-				if (!bit_test(gres_slurmd_conf->cpus_bitmap,i))
+				if (!bit_test(gres_slurmd_conf->cpus_bitmap, i))
 					continue;
 				if (!CPU_ISSET(i, &mask))
 					continue;
 				bit_nset(usable_gres, gres_inx,
-					 gres_inx + gres_slurmd_conf->count-1);
+					 gres_inx + gres_slurmd_conf->count -1);
 				break;
 			}
 		}
@@ -7147,13 +9553,99 @@ static bitstr_t * _get_usable_gres(int context_inx)
 }
 
 /*
- * Set environment variables as required for all tasks of a job step
+ * Given a set GRES maps and the local process ID, return the bitmap of
+ * GRES that should be available to this task.
+ */
+static bitstr_t *_get_gres_map(char *map_gres, int local_proc_id)
+{
+	bitstr_t *usable_gres = NULL;
+	char *tmp, *tok, *save_ptr = NULL, *mult;
+	int task_offset = 0, task_mult;
+	int map_value;
+
+	if (!map_gres || !map_gres[0])
+		return NULL;
+
+	tmp = xstrdup(map_gres);
+	tok = strtok_r(tmp, ",", &save_ptr);
+	while (tok) {
+		if ((mult = strchr(tok, '*'))) {
+			mult[0] = '\0';
+			task_mult = atoi(mult + 1);
+		} else
+			task_mult = 1;
+		if ((local_proc_id >= task_offset) &&
+		    (local_proc_id <= (task_offset + task_mult - 1))) {
+			map_value = strtol(tok, NULL, 0);
+			if ((map_value < 0) || (map_value >= MAX_GRES_BITMAP))
+				break;	/* Bad value */
+			usable_gres = bit_alloc(MAX_GRES_BITMAP);
+			bit_set(usable_gres, map_value);
+			break;	/* All done */
+		} else {
+			task_offset += task_mult;
+		}
+		tok = strtok_r(NULL, ",", &save_ptr);
+	}
+	xfree(tmp);
+
+	return usable_gres;
+}
+
+/*
+ * Given a set GRES masks and the local process ID, return the bitmap of
+ * GRES that should be available to this task.
+ */
+static bitstr_t * _get_gres_mask(char *mask_gres, int local_proc_id)
+{
+	bitstr_t *usable_gres = NULL;
+	char *tmp, *tok, *save_ptr = NULL, *mult;
+	int i, task_offset = 0, task_mult;
+	uint64_t mask_value;
+
+	if (!mask_gres || !mask_gres[0])
+		return NULL;
+
+	tmp = xstrdup(mask_gres);
+	tok = strtok_r(tmp, ",", &save_ptr);
+	while (tok) {
+		if ((mult = strchr(tok, '*')))
+			task_mult = atoi(mult + 1);
+		else
+			task_mult = 1;
+		if ((local_proc_id >= task_offset) &&
+		    (local_proc_id <= (task_offset + task_mult - 1))) {
+			mask_value = strtol(tok, NULL, 0);
+			if ((mask_value <= 0) || (mask_value >= 0xffffffff))
+				break;	/* Bad value */
+			usable_gres = bit_alloc(MAX_GRES_BITMAP);
+			for (i = 0; i < 64; i++) {
+				if ((mask_value >> i) & 0x1)
+					bit_set(usable_gres, i);
+			}
+			break;	/* All done */
+		} else {
+			task_offset += task_mult;
+		}
+		tok = strtok_r(NULL, ",", &save_ptr);
+	}
+	xfree(tmp);
+
+	return usable_gres;
+}
+
+/*
+ * Set environment as required for all tasks of a job step
  * IN/OUT job_env_ptr - environment variable array
  * IN step_gres_list - generated by gres_plugin_step_alloc()
- * IN accel_bind_type - GRES binding options
+ * IN accel_bind_type - GRES binding options (old format, a bitmap)
+ * IN tres_bind - TRES binding directives (new format, a string)
+ * IN tres_freq - TRES power management directives
+ * IN local_proc_id - task rank, local to this compute node only
  */
 extern void gres_plugin_step_set_env(char ***job_env_ptr, List step_gres_list,
-				     uint16_t accel_bind_type)
+				     uint16_t accel_bind_type, char *tres_bind,
+				     char *tres_freq, int local_proc_id)
 {
 	int i;
 	ListIterator gres_iter;
@@ -7161,13 +9653,23 @@ extern void gres_plugin_step_set_env(char ***job_env_ptr, List step_gres_list,
 	bool bind_gpu = accel_bind_type & ACCEL_BIND_CLOSEST_GPU;
 	bool bind_nic = accel_bind_type & ACCEL_BIND_CLOSEST_NIC;
 	bool bind_mic = accel_bind_type & ACCEL_BIND_CLOSEST_MIC;
+	char *sep, *map_gpu = NULL, *mask_gpu = NULL;
 	bitstr_t *usable_gres = NULL;
 
 	if (step_gres_list == NULL)
 		return;
 
-	(void) gres_plugin_init();
+	if (!bind_gpu && tres_bind && (sep = strstr(tres_bind, "gpu:"))) {
+		sep += 4;
+		if (!strncasecmp(sep, "closest", 7))
+			bind_gpu = true;
+		else if (!strncasecmp(sep, "map_gpu:", 8))
+			map_gpu = sep + 8;
+		else if (!strncasecmp(sep, "mask_gpu:", 9))
+			mask_gpu = sep + 9;
+	}
 
+	(void) gres_plugin_init();
 	slurm_mutex_lock(&gres_context_lock);
 	gres_iter = list_iterator_create(step_gres_list);
 	while ((gres_ptr = list_next(gres_iter))) {
@@ -7183,32 +9685,44 @@ extern void gres_plugin_step_set_env(char ***job_env_ptr, List step_gres_list,
 
 		if (!gres_context[i].ops.step_set_env)
 			continue;	/* No plugin to call */
-		if (bind_gpu || bind_mic || bind_nic) {
+		if (bind_gpu || bind_mic || bind_nic || map_gpu || mask_gpu) {
 			if (!xstrcmp(gres_context[i].gres_name, "gpu")) {
-				if (!bind_gpu)
+				if (map_gpu) {
+					usable_gres = _get_gres_map(map_gpu,
+								local_proc_id);
+				} else if (mask_gpu) {
+					usable_gres = _get_gres_mask(mask_gpu,
+								local_proc_id);
+				} else if (bind_gpu)
+					usable_gres = _get_usable_gres(i);
+				else
 					continue;
 			} else if (!xstrcmp(gres_context[i].gres_name, "mic")) {
-				if (!bind_mic)
+				if (bind_mic)
+					usable_gres = _get_usable_gres(i);
+				else
 					continue;
 			} else if (!xstrcmp(gres_context[i].gres_name, "nic")) {
-				if (!bind_nic)
+				if (bind_nic)
+					usable_gres = _get_usable_gres(i);
+				else
 					continue;
 			} else {
 				continue;
 			}
-			usable_gres = _get_usable_gres(i);
+
 		}
 
-		if (accel_bind_type)
+		if (accel_bind_type || tres_bind) {
 			(*(gres_context[i].ops.step_reset_env))
 				(job_env_ptr,
 				 gres_ptr->gres_data,
 				 usable_gres);
-		else
+		} else {
 			(*(gres_context[i].ops.step_set_env))
-				(job_env_ptr,
-				 gres_ptr->gres_data);
-
+				(job_env_ptr, gres_ptr->gres_data, tres_freq,
+				 local_proc_id);
+		}
 		FREE_NULL_BITMAP(usable_gres);
 	}
 	list_iterator_destroy(gres_iter);
@@ -7310,8 +9824,8 @@ extern uint64_t gres_plugin_step_test(List step_gres_list, List job_gres_list,
 	uint64_t core_cnt, tmp_cnt;
 	ListIterator  job_gres_iter, step_gres_iter;
 	gres_state_t *job_gres_ptr, *step_gres_ptr;
-
-	if (step_gres_list == NULL)
+//FIXME: Add step support for other GRES count specifications
+//	if (step_gres_list == NULL)
 		return NO_VAL64;
 	if (job_gres_list == NULL)
 		return 0;
@@ -7381,15 +9895,27 @@ static int _step_alloc(void *step_gres_data, void *job_gres_data,
 		return SLURM_ERROR;
 	}
 
-//FIXME: Add support for other GRES count specifications
-	gres_needed = step_gres_ptr->gres_per_node;
+	if (step_gres_ptr->gres_per_node) {
+		gres_needed = step_gres_ptr->gres_per_node;
+	} else {
+//FIXME: Add step support for other GRES count specifications
+		gres_needed = job_gres_ptr->gres_cnt_node_alloc[node_offset];
+	}
 	if (step_gres_ptr->node_cnt == 0)
 		step_gres_ptr->node_cnt = job_gres_ptr->node_cnt;
 	if (!step_gres_ptr->gres_cnt_node_alloc) {
 		step_gres_ptr->gres_cnt_node_alloc =
 			xmalloc(sizeof(uint64_t) * step_gres_ptr->node_cnt);
 	}
-	if (job_gres_ptr->gres_cnt_node_alloc)
+
+	if (job_gres_ptr->gres_cnt_node_alloc &&
+	    job_gres_ptr->gres_cnt_node_alloc[node_offset])
+		gres_avail = job_gres_ptr->gres_cnt_node_alloc[node_offset];
+	else if (job_gres_ptr->gres_bit_select &&
+		 job_gres_ptr->gres_bit_select[node_offset])
+		gres_avail = bit_set_count(
+				job_gres_ptr->gres_bit_select[node_offset]);
+	else if (job_gres_ptr->gres_cnt_node_alloc)
 		gres_avail = job_gres_ptr->gres_cnt_node_alloc[node_offset];
 	else
 		gres_avail = job_gres_ptr->gres_per_node;
@@ -8064,8 +10590,6 @@ extern void gres_build_job_details(List job_gres_list,
 			for (j = 0; j < my_gres_cnt; j++) {
 				if (j >= job_gres_data->node_cnt)
 					break;	/* node count mismatch */
-				if (job_gres_data->gres_bit_alloc[j] == NULL)
-					continue;
 				if (my_gres_details[j])
 					sep1 = ",";
 				else
@@ -8077,11 +10601,23 @@ extern void gres_build_job_details(List job_gres_list,
 					sep2 = "";
 					type = "";
 				}
-				bit_fmt(tmp_str, sizeof(tmp_str),
-                                        job_gres_data->gres_bit_alloc[j]);
-				xstrfmtcat(my_gres_details[j], "%s%s%s%s(IDX:%s)",
-					   sep1, gres_context[i].gres_name,
-					   sep2, type, tmp_str);
+				if (job_gres_data->gres_bit_alloc[j]) {
+					bit_fmt(tmp_str, sizeof(tmp_str),
+		                                job_gres_data->
+						gres_bit_alloc[j]);
+					xstrfmtcat(my_gres_details[j],
+						   "%s%s%s%s(IDX:%s)", sep1,
+						   gres_context[i].gres_name,
+						   sep2, type, tmp_str);
+				} else {
+					xstrfmtcat(my_gres_details[j],
+						   "%s%s%s%s(CNT:%"PRIu64")",
+						   sep1,
+						   gres_context[i].gres_name,
+						   sep2, type,
+						   job_gres_data->
+						   gres_cnt_node_alloc[j]);
+				}
 			}
 			break;
 		}
@@ -8238,14 +10774,13 @@ extern char *gres_2_tres_str(List gres_list, bool is_job, bool locked)
 			gres_job_state_t *gres_data_ptr = (gres_job_state_t *)
 				gres_state_ptr->gres_data;
 			col_name = gres_data_ptr->type_name;
-//FIXME: Change to total_gres check below once field is set
-			count = gres_data_ptr->gres_per_node *
-				(uint64_t)gres_data_ptr->node_cnt;
+			count = gres_data_ptr->total_gres;
 		} else {
 			gres_step_state_t *gres_data_ptr = (gres_step_state_t *)
 				gres_state_ptr->gres_data;
 			col_name = gres_data_ptr->type_name;
-//FIXME: Change to total_gres check below once field is set
+//FIXME: Step support, change to total_gres check below once field is set
+//			count = gres_data_ptr->total_gres;
 			count = gres_data_ptr->gres_per_node *
 				(uint64_t)gres_data_ptr->node_cnt;
 		}
@@ -8273,10 +10808,10 @@ extern char *gres_2_tres_str(List gres_list, bool is_job, bool locked)
 				   tres_str ? "," : "",
 				   tres_rec->id, count);
 
-		/* Now lets put of the : name tres if we are tracking
+		/*
+		 * Now lets put of the : name tres if we are tracking
 		 * it as well.  This would be handy for gres like
-		 * gpu:tesla, where you might want to track both as
-		 * TRES.
+		 * gpu:tesla, where you might want to track both as TRES.
 		 */
 		if (col_name && (i < gres_context_cnt)) {
 			tres_req.name = xstrdup_printf(
@@ -8357,9 +10892,7 @@ static void _set_type_tres_cnt(gres_state_type_enum_t state_type,
 		{
 			gres_job_state_t *gres_data_ptr = (gres_job_state_t *)
 				gres_state_ptr->gres_data;
-//FIXME: Change to total_gres check below once field is set
-			count = gres_data_ptr->gres_per_node *
-				(uint64_t)node_cnt;
+			count = gres_data_ptr->total_gres;
 			break;
 		}
 		case GRES_STATE_TYPE_NODE:
@@ -8370,8 +10903,8 @@ static void _set_type_tres_cnt(gres_state_type_enum_t state_type,
 			break;
 		}
 		default:
-			error("unsupported state type %d in %s",
-			      state_type, __func__);
+			error("%s: unsupported state type %d", __func__,
+			      state_type);
 			continue;
 		}
 		/* Set main tres's count. */
@@ -8429,8 +10962,8 @@ static void _set_type_tres_cnt(gres_state_type_enum_t state_type,
 			break;
 		}
 		default:
-			error("unsupported state type %d in %s",
-			      state_type, __func__);
+			error("%s: unsupported state type %d", __func__,
+			      state_type);
 			continue;
 		}
 	}

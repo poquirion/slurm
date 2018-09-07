@@ -62,7 +62,7 @@ xcgroup_t task_cpuacct_cg;
 static uint32_t max_task_id;
 
 extern int
-jobacct_gather_cgroup_cpuacct_init(slurm_cgroup_conf_t *slurm_cgroup_conf)
+jobacct_gather_cgroup_cpuacct_init(void)
 {
 	/* initialize user/job/jobstep cgroup relative paths */
 	user_cgroup_path[0]='\0';
@@ -70,7 +70,7 @@ jobacct_gather_cgroup_cpuacct_init(slurm_cgroup_conf_t *slurm_cgroup_conf)
 	jobstep_cgroup_path[0]='\0';
 
 	/* initialize cpuacct cgroup namespace */
-	if (xcgroup_ns_create(slurm_cgroup_conf, &cpuacct_ns,  "", "cpuacct")
+	if (xcgroup_ns_create(&cpuacct_ns,  "", "cpuacct")
 	    != XCGROUP_SUCCESS) {
 		error("jobacct_gather/cgroup: unable to create cpuacct "
 		      "namespace");
@@ -81,7 +81,7 @@ jobacct_gather_cgroup_cpuacct_init(slurm_cgroup_conf_t *slurm_cgroup_conf)
 }
 
 extern int
-jobacct_gather_cgroup_cpuacct_fini(slurm_cgroup_conf_t *slurm_cgroup_conf)
+jobacct_gather_cgroup_cpuacct_fini(void)
 {
 	xcgroup_t cpuacct_cg;
 	bool lock_ok;
@@ -117,18 +117,20 @@ jobacct_gather_cgroup_cpuacct_fini(slurm_cgroup_conf_t *slurm_cgroup_conf)
 	 */
 	for (cc = 0; cc <= max_task_id; cc++) {
 		xcgroup_t cgroup;
-		char buf[PATH_MAX];
+		char *buf = NULL;
 
 		/* rmdir all tasks this running slurmstepd
 		 * was responsible for.
 		 */
-		sprintf(buf, "%s%s/task_%d",
-			cpuacct_ns.mnt_point, jobstep_cgroup_path, cc);
+		xstrfmtcat(buf, "%s%s/task_%d",
+			   cpuacct_ns.mnt_point, jobstep_cgroup_path, cc);
 		cgroup.path = buf;
 
 		if (xcgroup_delete(&cgroup) != XCGROUP_SUCCESS) {
 			debug2("%s: failed to delete %s %m", __func__, buf);
 		}
+
+		xfree(buf);
 	}
 
 	if (xcgroup_delete(&step_cpuacct_cg) != XCGROUP_SUCCESS) {

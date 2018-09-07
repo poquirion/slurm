@@ -291,26 +291,26 @@ void slurm_write_ctl_conf ( slurm_ctl_conf_info_msg_t * slurm_ctl_conf_ptr,
 
 		if (p[i].def_mem_per_cpu & MEM_PER_CPU) {
 		        if (p[i].def_mem_per_cpu != MEM_PER_CPU)
-		                fprintf(fp, "DefMemPerCPU=%"PRIu64"",
+		                fprintf(fp, " DefMemPerCPU=%"PRIu64"",
 		                        p[i].def_mem_per_cpu & (~MEM_PER_CPU));
 		} else if (p[i].def_mem_per_cpu != 0)
-		        fprintf(fp, "DefMemPerNode=%"PRIu64"",
+		        fprintf(fp, " DefMemPerNode=%"PRIu64"",
 		                p[i].def_mem_per_cpu);
 
 		if (!p[i].allow_accounts && p[i].deny_accounts)
-			fprintf(fp, "DenyAccounts=%s", p[i].deny_accounts);
+			fprintf(fp, " DenyAccounts=%s", p[i].deny_accounts);
 
 		if (!p[i].allow_qos && p[i].deny_qos)
-			fprintf(fp, "DenyQos=%s", p[i].deny_qos);
+			fprintf(fp, " DenyQos=%s", p[i].deny_qos);
 
 		if (p[i].default_time != NO_VAL) {
 			if (p[i].default_time == INFINITE)
-				fprintf(fp, "DefaultTime=UNLIMITED");
+				fprintf(fp, " DefaultTime=UNLIMITED");
 			else {
 		                char time_line[32];
 		                secs2time_str(p[i].default_time * 60, time_line,
 					      sizeof(time_line));
-				fprintf(fp, "DefaultTime=%s", time_line);
+				fprintf(fp, " DefaultTime=%s", time_line);
 			}
 		}
 
@@ -342,7 +342,7 @@ void slurm_write_ctl_conf ( slurm_ctl_conf_info_msg_t * slurm_ctl_conf_ptr,
 				p[i].max_mem_per_cpu);
 
 		if (p[i].max_nodes != INFINITE)
-		        fprintf(fp, "MaxNodes=%u", p[i].max_nodes);
+		        fprintf(fp, " MaxNodes=%u", p[i].max_nodes);
 
 		if (p[i].max_time != INFINITE) {
 			char time_line[32];
@@ -776,6 +776,11 @@ extern void *slurm_ctl_conf_2_key_pairs (slurm_ctl_conf_t* slurm_ctl_conf_ptr)
 	key_pair = xmalloc(sizeof(config_key_pair_t));
 	key_pair->name = xstrdup("GresTypes");
 	key_pair->value = xstrdup(slurm_ctl_conf_ptr->gres_plugins);
+	list_append(ret_list, key_pair);
+
+	key_pair = xmalloc(sizeof(config_key_pair_t));
+	key_pair->name = xstrdup("GpuFreqDef");
+	key_pair->value = xstrdup(slurm_ctl_conf_ptr->gpu_freq_def);
 	list_append(ret_list, key_pair);
 
 	snprintf(tmp_str, sizeof(tmp_str), "%u",
@@ -1454,13 +1459,9 @@ extern void *slurm_ctl_conf_2_key_pairs (slurm_ctl_conf_t* slurm_ctl_conf_ptr)
 
 
 	for (i = 0; i < slurm_ctl_conf_ptr->control_cnt; i++) {
-		if (!slurm_ctl_conf_ptr->control_machine[i])
-			break;
-
 		key_pair = xmalloc(sizeof(config_key_pair_t));
 		xstrfmtcat(key_pair->name, "SlurmctldHost[%d]", i);
-		if (slurm_ctl_conf_ptr->control_addr[i] &&
-		    xstrcmp(slurm_ctl_conf_ptr->control_machine[i],
+		if (xstrcmp(slurm_ctl_conf_ptr->control_machine[i],
 			    slurm_ctl_conf_ptr->control_addr[i])) {
 			xstrfmtcat(key_pair->value, "%s(%s)",
 				   slurm_ctl_conf_ptr->control_machine[i],

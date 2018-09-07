@@ -58,6 +58,7 @@
 #include "src/common/slurm_rlimits_info.h"
 #include "src/common/stepd_api.h"
 #include "src/common/switch.h"
+#include "src/common/xcgroup_read_config.h"
 #include "src/common/xmalloc.h"
 #include "src/common/xsignal.h"
 #include "src/common/xstring.h"
@@ -66,6 +67,7 @@
 #include "src/slurmd/common/slurmstepd_init.h"
 #include "src/slurmd/common/setproctitle.h"
 #include "src/slurmd/common/proctrack.h"
+#include "src/slurmd/common/xcpuinfo.h"
 #include "src/slurmd/slurmd/slurmd.h"
 #include "src/slurmd/slurmstepd/mgr.h"
 #include "src/slurmd/slurmstepd/req.h"
@@ -191,6 +193,10 @@ extern int stepd_cleanup(slurm_msg_t *msg, stepd_step_rec_t *job,
 	}
 
 	mpi_fini();	/* Remove stale PMI2 sockets */
+
+	if (conf->hwloc_xml)
+		(void)remove(conf->hwloc_xml);
+
 #ifdef MEMORY_LEAK_DEBUG
 	acct_gather_conf_destroy();
 	(void) core_spec_g_fini();
@@ -198,11 +204,14 @@ extern int stepd_cleanup(slurm_msg_t *msg, stepd_step_rec_t *job,
 
 	fini_setproctitle();
 
+	xcgroup_fini_slurm_cgroup_conf();
+
 	xfree(cli);
 	xfree(self);
 	xfree(conf->block_map);
 	xfree(conf->block_map_inv);
 	xfree(conf->hostname);
+	xfree(conf->hwloc_xml);
 	xfree(conf->job_acct_gather_freq);
 	xfree(conf->job_acct_gather_type);
 	xfree(conf->logfile);
@@ -466,7 +475,8 @@ _init_from_slurmd(int sock, char **argv,
 	char *incoming_buffer = NULL;
 	Buf buffer;
 	int step_type;
-	int len, proto;
+	int len;
+	uint16_t proto;
 	slurm_addr_t *cli = NULL;
 	slurm_addr_t *self = NULL;
 	slurm_msg_t *msg = NULL;
@@ -495,7 +505,7 @@ _init_from_slurmd(int sock, char **argv,
 	/* Receive TRES information for slurmd */
 	safe_read(sock, &len, sizeof(int));
 	if (len > 0) {
-		incoming_buffer = xmalloc(sizeof(char) * len);
+		incoming_buffer = xmalloc(len);
 		safe_read(sock, incoming_buffer, len);
 		buffer = create_buf(incoming_buffer, len);
 		slurm_unpack_list(&tmp_list,
@@ -513,6 +523,11 @@ _init_from_slurmd(int sock, char **argv,
 	/* assoc_mgr_post_tres_list destroys tmp_list */
 	tmp_list = NULL;
 	assoc_mgr_unlock(&locks);
+
+	/* receive cgroup conf from slurmd */
+	if (xcgroup_read_conf(sock) != SLURM_SUCCESS)
+		fatal("Failed to read cgroup conf from slurmd");
+
 
 	/* receive job type from slurmd */
 	safe_read(sock, &step_type, sizeof(int));
@@ -538,7 +553,7 @@ _init_from_slurmd(int sock, char **argv,
 
 	/* receive cli from slurmd */
 	safe_read(sock, &len, sizeof(int));
-	incoming_buffer = xmalloc(sizeof(char) * len);
+	incoming_buffer = xmalloc(len);
 	safe_read(sock, incoming_buffer, len);
 	buffer = create_buf(incoming_buffer,len);
 	cli = xmalloc(sizeof(slurm_addr_t));
@@ -550,7 +565,7 @@ _init_from_slurmd(int sock, char **argv,
 	safe_read(sock, &len, sizeof(int));
 	if (len > 0) {
 		/* receive packed self from main slurmd */
-		incoming_buffer = xmalloc(sizeof(char) * len);
+		incoming_buffer = xmalloc(len);
 		safe_read(sock, incoming_buffer, len);
 		buffer = create_buf(incoming_buffer,len);
 		self = xmalloc(sizeof(slurm_addr_t));
@@ -576,7 +591,7 @@ _init_from_slurmd(int sock, char **argv,
 
 	/* receive req from slurmd */
 	safe_read(sock, &len, sizeof(int));
-	incoming_buffer = xmalloc(sizeof(char) * len);
+	incoming_buffer = xmalloc(len);
 	safe_read(sock, incoming_buffer, len);
 	buffer = create_buf(incoming_buffer,len);
 
@@ -615,6 +630,11 @@ _init_from_slurmd(int sock, char **argv,
 	}
 
 	_set_job_log_prefix(jobid, stepid);
+
+	if (!conf->hwloc_xml)
+		conf->hwloc_xml = xstrdup_printf("%s/hwloc_topo_%u.%u.xml",
+						 conf->spooldir,
+						 jobid, stepid);
 
 	/*
 	 * Swap the field to the srun client version, which will eventually
@@ -669,10 +689,12 @@ _step_setup(slurm_addr_t *cli, slurm_addr_t *self, slurm_msg_t *msg)
 		gres_plugin_step_state_log(job->step_gres_list, job->jobid,
 					   job->stepid);
 	}
-	if (msg->msg_type == REQUEST_BATCH_JOB_LAUNCH)
+	if (msg->msg_type == REQUEST_BATCH_JOB_LAUNCH) {
 		gres_plugin_job_set_env(&job->env, job->job_gres_list, 0);
-	else if (msg->msg_type == REQUEST_LAUNCH_TASKS)
-		gres_plugin_step_set_env(&job->env, job->step_gres_list, 0);
+	} else if (msg->msg_type == REQUEST_LAUNCH_TASKS) {
+		gres_plugin_step_set_env(&job->env, job->step_gres_list, 0,
+					 NULL, NULL, -1);
+	}
 
 	/*
 	 * Add slurmd node topology informations to job env array

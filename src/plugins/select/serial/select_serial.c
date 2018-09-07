@@ -62,6 +62,7 @@ bitstr_t *idle_node_bitmap __attribute__((weak_import));
 uint16_t *cr_node_num_cores __attribute__((weak_import));
 uint32_t *cr_node_cores_offset __attribute__((weak_import));
 int slurmctld_tres_cnt __attribute__((weak_import)) = 0;
+slurmctld_config_t slurmctld_config __attribute__((weak_import));
 #else
 slurm_ctl_conf_t slurmctld_conf;
 struct node_record *node_record_table_ptr;
@@ -76,6 +77,7 @@ bitstr_t *idle_node_bitmap;
 uint16_t *cr_node_num_cores;
 uint32_t *cr_node_cores_offset;
 int slurmctld_tres_cnt = 0;
+slurmctld_config_t slurmctld_config;
 #endif
 
 /*
@@ -735,27 +737,24 @@ static int _add_job_to_res(struct job_record *job_ptr, int action)
 	bitstr_t *core_bitmap;
 
 	if (!job || !job->core_bitmap) {
-		error("select/serial: job %u has no select data",
-		      job_ptr->job_id);
+		error("%s: %pJ has no select data", plugin_type, job_ptr);
 		return SLURM_ERROR;
 	}
 
-	debug3("select/serial: _add_job_to_res: job %u act %d ",
-	       job_ptr->job_id, action);
+	debug3("%s: %s: %pJ act %d", plugin_type, __func__, job_ptr, action);
 
 	if (select_debug_flags & DEBUG_FLAG_SELECT_TYPE)
 		_dump_job_res(job);
 
 	i_first = bit_ffs(job->node_bitmap);
 	if (i_first == -1) {
-		error("select/serial: job %u allocated no nodes",
-		      job_ptr->job_id);
+		error("%s: %pJ allocated no nodes", plugin_type, job_ptr);
 		i_last = -2;
 	} else {
 		i_last  = bit_fls(job->node_bitmap);
 		if (i_first != i_last) {
-			error("select/serial: job %u allocated more than one "
-			      "node", job_ptr->job_id);
+			error("%s: %pJ allocated more than one node",
+			      plugin_type, job_ptr);
 		}
 	}
 
@@ -772,8 +771,9 @@ static int _add_job_to_res(struct job_record *job_ptr, int action)
 				gres_list = node_ptr->gres_list;
 			core_bitmap = copy_job_resources_node(job, n);
 			gres_plugin_job_alloc(job_ptr->gres_list, gres_list,
-					      job->nhosts, n, job_ptr->job_id,
-					      node_ptr->name, core_bitmap);
+					      job->nhosts, i, n,
+					      job_ptr->job_id, node_ptr->name,
+					      core_bitmap);
 			gres_plugin_node_state_log(gres_list, node_ptr->name);
 			FREE_NULL_BITMAP(core_bitmap);
 		}
@@ -785,11 +785,10 @@ static int _add_job_to_res(struct job_record *job_ptr, int action)
 				job->memory_allocated[n];
 			if ((select_node_usage[i].alloc_memory >
 			     select_node_record[i].real_memory)) {
-				error("select/serial: node %s memory is "
-				      "overallocated (%"PRIu64") for job %u",
-				      node_ptr->name,
+				error("%s: node %s memory is overallocated (%"PRIu64") for %pJ",
+				      plugin_type, node_ptr->name,
 				      select_node_usage[i].alloc_memory,
-				      job_ptr->job_id);
+				      job_ptr);
 			}
 		}
 	}
@@ -819,8 +818,8 @@ static int _add_job_to_res(struct job_record *job_ptr, int action)
 		for (i = 0; i < p_ptr->num_rows; i++) {
 			if (!_can_job_fit_in_row(job, &(p_ptr->row[i])))
 				continue;
-			debug3("select/serial: adding job %u to part %s row %u",
-			       job_ptr->job_id, p_ptr->part_ptr->name, i);
+			debug3("%s: adding %pJ to part %s row %u",
+			       plugin_type, job_ptr, p_ptr->part_ptr->name, i);
 			_add_job_to_row(job, &(p_ptr->row[i]));
 			break;
 		}
@@ -864,7 +863,7 @@ static int _rm_job_from_res(struct part_res_record *part_record_ptr,
 	int i_first, i_last;
 	int i, n;
 	List gres_list;
-
+	bool old_job = false;
 
 	if (select_state_initializing) {
 		/* Ignore job removal until select/cons_res data structures
@@ -872,20 +871,19 @@ static int _rm_job_from_res(struct part_res_record *part_record_ptr,
 		return SLURM_SUCCESS;
 	}
 	if (!job || !job->core_bitmap) {
-		error("select/serial: job %u has no select data",
-		      job_ptr->job_id);
+		error("%s: %pJ has no select data", plugin_type, job_ptr);
 		return SLURM_ERROR;
 	}
 
-	debug3("select/serial: _rm_job_from_res: job %u action %d",
-	       job_ptr->job_id, action);
+	debug3("%s: %s: %pJ act %d", plugin_type, __func__, job_ptr, action);
+	if (job_ptr->start_time < slurmctld_config.boot_time)
+		old_job = true;
 	if (select_debug_flags & DEBUG_FLAG_SELECT_TYPE)
 		_dump_job_res(job);
 
 	i_first = bit_ffs(job->node_bitmap);
 	if (i_first == -1) {
-		error("select/serial: job %u allocated no nodes",
-		      job_ptr->job_id);
+		error("%s: %pJ allocated no nodes", plugin_type, job_ptr);
 		i_last = -2;
 	} else
 		i_last =  bit_fls(job->node_bitmap);
@@ -902,7 +900,7 @@ static int _rm_job_from_res(struct part_res_record *part_record_ptr,
 				gres_list = node_ptr->gres_list;
 			gres_plugin_job_dealloc(job_ptr->gres_list, gres_list,
 						n, job_ptr->job_id,
-						node_ptr->name);
+						node_ptr->name, old_job);
 			gres_plugin_node_state_log(gres_list, node_ptr->name);
 		}
 
@@ -912,13 +910,10 @@ static int _rm_job_from_res(struct part_res_record *part_record_ptr,
 
 			if (node_usage[i].alloc_memory <
 			    job->memory_allocated[n]) {
-				error("select/serial: node %s memory is "
-				      "under-allocated (%"PRIu64"<%"PRIu64") "
-				      "for job %u",
-				      node_ptr->name,
+				error("%s: node %s memory is under-allocated (%"PRIu64"<%"PRIu64") for %pJ",
+				      plugin_type, node_ptr->name,
 				      node_usage[i].alloc_memory,
-				      job->memory_allocated[n],
-				      job_ptr->job_id);
+				      job->memory_allocated[n], job_ptr);
 				node_usage[i].alloc_memory = 0;
 			} else {
 				node_usage[i].alloc_memory -=
@@ -933,9 +928,8 @@ static int _rm_job_from_res(struct part_res_record *part_record_ptr,
 		struct part_res_record *p_ptr;
 
 		if (!job_ptr->part_ptr) {
-			error("select/serial: removed job %u does not have a "
-			      "partition assigned",
-			      job_ptr->job_id);
+			error("%s: removed %pJ does not have a partition assigned",
+			      plugin_type, job_ptr);
 			return SLURM_ERROR;
 		}
 
@@ -944,9 +938,8 @@ static int _rm_job_from_res(struct part_res_record *part_record_ptr,
 				break;
 		}
 		if (!p_ptr) {
-			error("select/serial: removed job %u could not find "
-			      "part %s",
-			      job_ptr->job_id, job_ptr->part_ptr->name);
+			error("%s: removed %pJ could not find part %s",
+			      plugin_type, job_ptr, job_ptr->part_ptr->name);
 			return SLURM_ERROR;
 		}
 
@@ -960,9 +953,8 @@ static int _rm_job_from_res(struct part_res_record *part_record_ptr,
 			for (j = 0; j < p_ptr->row[i].num_jobs; j++) {
 				if (p_ptr->row[i].job_list[j] != job)
 					continue;
-				debug3("select/serial: removed job %u from "
-				       "part %s row %u",
-				       job_ptr->job_id,
+				debug3("%s: removed %pJ from part %s row %u",
+				       plugin_type, job_ptr,
 				       p_ptr->part_ptr->name, i);
 				for (; j < p_ptr->row[i].num_jobs-1; j++) {
 					p_ptr->row[i].job_list[j] =
@@ -1287,8 +1279,8 @@ static int _will_run_test(struct job_record *job_ptr, bitstr_t *bitmap,
 			continue;
 		if (tmp_job_ptr->end_time == 0) {
 			if (!cleaning) {
-				error("%s: Active job %u has zero end_time",
-				      __func__, tmp_job_ptr->job_id);
+				error("%s: Active %pJ has zero end_time",
+				      __func__, tmp_job_ptr);
 			}
 			continue;
 		}
@@ -1298,8 +1290,8 @@ static int _will_run_test(struct job_record *job_ptr, bitstr_t *bitmap,
 			 * while NHC was running
 			 */
 			if (!cleaning) {
-				error("%s: Job %u has NULL node_bitmap",
-				      __func__, tmp_job_ptr->job_id);
+				error("%s: %pJ has NULL node_bitmap",
+				      __func__, tmp_job_ptr);
 			}
 			continue;
 		}
@@ -1349,8 +1341,8 @@ static int _will_run_test(struct job_record *job_ptr, bitstr_t *bitmap,
 			ovrlap = bit_overlap(bitmap, tmp_job_ptr->node_bitmap);
 			if (ovrlap == 0)	/* job has no usable nodes */
 				continue;	/* skip it */
-			debug2("cons_res: _will_run_test, job %u: overlap=%d",
-			       tmp_job_ptr->job_id, ovrlap);
+			debug2("%s: %s: %pJ: overlap=%d",
+			       plugin_type, __func__, tmp_job_ptr, ovrlap);
 			_rm_job_from_res(future_part, future_usage,
 					 tmp_job_ptr, 0);
 			rc = cr_job_test(job_ptr, bitmap,
@@ -1553,8 +1545,7 @@ static bool _is_job_spec_serial(struct job_record *job_ptr)
 
 	if (details_ptr) {
 		if (job_ptr->details->share_res == 0) {
-			debug("Clearing exclusive flag for job %u",
-			      job_ptr->job_id);
+			debug("Clearing exclusive flag for %pJ", job_ptr);
 			job_ptr->details->share_res  = 1;
 			job_ptr->details->whole_node = 0;
 		}
@@ -1657,22 +1648,21 @@ extern int select_p_job_test(struct job_record *job_ptr, bitstr_t * bitmap,
 		return EINVAL;
 
 	if ((min_nodes > 1) || !_is_job_spec_serial(job_ptr)) {
-		info("select/serial: job %u not serial", job_ptr->job_id);
+		info("%s: %pJ not serial", plugin_type, job_ptr);
 		return SLURM_ERROR;
 	}
 
 	if (job_ptr->details->core_spec != NO_VAL16) {
-		verbose("select/serial: job %u core_spec(%u) not supported",
-			job_ptr->job_id, job_ptr->details->core_spec);
+		verbose("%s: %pJ core_spec(%u) not supported",
+			plugin_type, job_ptr, job_ptr->details->core_spec);
 		job_ptr->details->core_spec = NO_VAL16;
 	}
 
 	job_node_share = _get_job_node_share(job_ptr);
 
 	if (select_debug_flags & DEBUG_FLAG_SELECT_TYPE) {
-		info("select/serial: select_p_job_test: job %u node_share %u "
-		     "mode %d avail_n %u",
-		     job_ptr->job_id, job_node_share, mode,
+		info("%s: %s: %pJ node_share %u mode %d avail_n %u",
+		     plugin_type, __func__, job_ptr, job_node_share, mode,
 		     bit_set_count(bitmap));
 		_dump_state(select_part_record);
 	}
@@ -1689,13 +1679,12 @@ extern int select_p_job_test(struct job_record *job_ptr, bitstr_t * bitmap,
 
 	if (select_debug_flags & DEBUG_FLAG_SELECT_TYPE) {
 		if (job_ptr->job_resrcs)
-			log_job_resources(job_ptr->job_id, job_ptr->job_resrcs);
+			log_job_resources(job_ptr);
 		else {
-			info("no job_resources info for job %u",
-			     job_ptr->job_id);
+			info("no job_resources info for %pJ", job_ptr);
 		}
 	} else if (debug_cpu_bind && job_ptr->job_resrcs) {
-		log_job_resources(job_ptr->job_id, job_ptr->job_resrcs);
+		log_job_resources(job_ptr);
 	}
 
 	return rc;
@@ -2120,11 +2109,6 @@ extern char *select_p_select_jobinfo_xstrdup(select_jobinfo_t *jobinfo,
 	return NULL;
 }
 
-extern int select_p_update_basil(void)
-{
-	return SLURM_SUCCESS;
-}
-
 extern int select_p_get_info_from_plugin(enum select_plugindata_info info,
 					 struct job_record *job_ptr,
 					 void *data)
@@ -2304,14 +2288,4 @@ extern bitstr_t * select_p_resv_test(resv_desc_msg_t *resv_desc_ptr,
 	if ((rem_cores > 0) || (rem_nodes > 0))
 		FREE_NULL_BITMAP(new_bitmap);
 	return new_bitmap;
-}
-
-extern void select_p_ba_init(node_info_msg_t *node_info_ptr, bool sanity_check)
-{
-	return;
-}
-
-extern int *select_p_ba_get_dims(void)
-{
-	return NULL;
 }

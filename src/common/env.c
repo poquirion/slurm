@@ -92,30 +92,6 @@ strong_alias(env_unset_environment,	slurm_env_unset_environment);
 #define MAX_ENV_STRLEN (32 * 4096)	/* Needed for CPU_BIND and MEM_BIND on
 					 * SGI systems with huge CPU counts */
 
-static int _setup_particulars(uint32_t cluster_flags,
-			       char ***dest,
-			       dynamic_plugin_data_t *select_jobinfo)
-{
-	int rc = SLURM_SUCCESS;
-	if (cluster_flags & CLUSTER_FLAG_CRAY_A) {
-		uint32_t resv_id = 0;
-
-		select_g_select_jobinfo_get(select_jobinfo,
-					    SELECT_JOBDATA_RESV_ID,
-					    &resv_id);
-		if (resv_id) {
-			setenvf(dest, "BASIL_RESERVATION_ID", "%u", resv_id);
-		} else {
-			/* This is not an error for a Slurm job allocation with
-			 * no compute nodes and no BASIL reservation */
-			verbose("Can't set BASIL_RESERVATION_ID "
-			        "environment variable");
-		}
-	}
-
-	return rc;
-}
-
 /*
  *  Return pointer to `name' entry in environment if found, or
  *   pointer to the last entry (i.e. NULL) if `name' is not
@@ -624,11 +600,6 @@ int setup_env(env_t *env, bool preserve_env)
 		rc = SLURM_FAILURE;
 	}
 
-	if (env->select_jobinfo) {
-		_setup_particulars(cluster_flags, &env->env,
-				   env->select_jobinfo);
-	}
-
 	if (env->jobid >= 0) {
 		if (setenvf(&env->env, "SLURM_JOB_ID", "%d", env->jobid)) {
 			error("Unable to set SLURM_JOB_ID environment");
@@ -952,7 +923,6 @@ extern int env_array_for_job(char ***dest,
 	char *key, *value;
 	slurm_step_layout_t *step_layout = NULL;
 	int i, rc = SLURM_SUCCESS;
-	uint32_t cluster_flags = slurmdb_setup_cluster_flags();
 	slurm_step_layout_req_t step_layout_req;
 	uint16_t cpus_per_task_array[1];
 	uint32_t cpus_task_reps[1];
@@ -965,8 +935,6 @@ extern int env_array_for_job(char ***dest,
 	step_layout_req.num_hosts = alloc->node_cnt;
 	cpus_per_task_array[0] = desc->cpus_per_task;
 	cpus_task_reps[0] = alloc->node_cnt;
-
-	_setup_particulars(cluster_flags, dest, alloc->select_jobinfo);
 
 	if (pack_offset < 1) {
 		env_array_overwrite_fmt(dest, "SLURM_JOB_ID", "%u",
@@ -1165,7 +1133,6 @@ env_array_for_batch_job(char ***dest, const batch_job_launch_msg_t *batch,
 	slurm_step_layout_t *step_layout = NULL;
 	uint16_t cpus_per_task;
 	uint32_t task_dist;
-	uint32_t cluster_flags = slurmdb_setup_cluster_flags();
 	slurm_step_layout_req_t step_layout_req;
 	uint16_t cpus_per_task_array[1];
 	uint32_t cpus_task_reps[1];
@@ -1175,8 +1142,6 @@ env_array_for_batch_job(char ***dest, const batch_job_launch_msg_t *batch,
 
 	memset(&step_layout_req, 0, sizeof(slurm_step_layout_req_t));
 	step_layout_req.num_tasks = batch->ntasks;
-
-	_setup_particulars(cluster_flags, dest, batch->select_jobinfo);
 
 	/*
 	 * There is no explicit node count in the batch structure,
@@ -1976,7 +1941,7 @@ char **env_array_user_default(const char *username, int timeout, int mode,
 	char *starttoken = "XXXXSLURMSTARTPARSINGHEREXXXX";
 	char *stoptoken  = "XXXXSLURMSTOPPARSINGHEREXXXXX";
 	char cmdstr[256], *env_loc = NULL;
-	char stepd_path[MAXPATHLEN];
+	char *stepd_path;
 	int fildes[2], found, fval, len, rc, timeleft;
 	int buf_read, buf_rem, config_timeout;
 	pid_t child;
@@ -1989,8 +1954,6 @@ char **env_array_user_default(const char *username, int timeout, int mode,
 		return NULL;
 	}
 
-	snprintf(stepd_path, sizeof(stepd_path), "%s/sbin/slurmstepd",
-		 SLURM_PREFIX);
 	config_timeout = slurm_get_env_timeout();
 
 	if (config_timeout == 0)	/* just read directly from cache */
@@ -2000,9 +1963,10 @@ char **env_array_user_default(const char *username, int timeout, int mode,
 		fatal("Could not locate command: "SUCMD);
 	if (stat("/bin/echo", &buf))
 		fatal("Could not locate command: /bin/echo");
+	xstrfmtcat(stepd_path, "%s/sbin/slurmstepd", SLURM_PREFIX);
 	if (stat(stepd_path, &buf) == 0) {
-		snprintf(name, sizeof(name), "%s getenv", stepd_path);
-		env_loc = name;
+		xstrfmtcat(stepd_path, "%s getenv", stepd_path);
+		env_loc = stepd_path;
 	} else if (stat("/bin/env", &buf) == 0)
 		env_loc = "/bin/env";
 	else if (stat("/usr/bin/env", &buf) == 0)
@@ -2013,6 +1977,7 @@ char **env_array_user_default(const char *username, int timeout, int mode,
 		 "/bin/echo; /bin/echo; /bin/echo; "
 		 "/bin/echo %s; %s; /bin/echo %s",
 		 starttoken, env_loc, stoptoken);
+	xfree(stepd_path);
 
 	if (pipe(fildes) < 0) {
 		fatal("pipe: %m");

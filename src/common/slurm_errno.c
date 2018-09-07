@@ -354,7 +354,7 @@ static slurm_errtab_t slurm_errtab[] = {
 	{ ESLURM_BATCH_CONSTRAINT,
 	  "Job --batch option is invalid or not a subset of --constraints" },
 	{ ESLURM_INVALID_TRES,
-	  "Invalid TRES specification"				},
+	  "Invalid Trackable RESource (TRES) specification"	},
 	{ ESLURM_INVALID_TRES_BILLING_WEIGHTS,
 	  "Invalid TRESBillingWeights specification"            },
 	{ ESLURM_INVALID_JOB_DEFAULTS,
@@ -363,6 +363,8 @@ static slurm_errtab_t slurm_errtab[] = {
 	  "Job can not start due to maintenance reservation."	},
 	{ ESLURM_INVALID_GRES_TYPE,
 	  "Invalid GRES specification (with and without type identification)" },
+	{ ESLURM_REBOOT_IN_PROGRESS,
+	  "Reboot already in progress" },
 
 	/* slurmd error codes */
 	{ ESLRUMD_PIPE_ERROR_ON_TASK_SPAWN,

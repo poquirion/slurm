@@ -655,7 +655,9 @@ _process_env_var(env_vars_t *e, const char *val)
 		}
 		break;
 	case OPT_GRES_FLAGS:
-		if (!xstrcasecmp(val, "enforce-binding")) {
+		if (!xstrcasecmp(val, "disable-binding")) {
+			opt.job_flags |= GRES_DISABLE_BIND;
+		} else if (!xstrcasecmp(val, "enforce-binding")) {
 			opt.job_flags |= GRES_ENFORCE_BIND;
 		} else {
 			error("Invalid SBATCH_GRES_FLAGS specification: %s",
@@ -2043,7 +2045,9 @@ static void _set_options(int argc, char **argv)
 		case LONG_OPT_GRES_FLAGS:
 			if (!optarg)
 				break;	/* Fix for Coverity false positive */
-			if (!xstrcasecmp(optarg, "enforce-binding")) {
+			if (!xstrcasecmp(optarg, "disable-binding")) {
+				opt.job_flags |= GRES_DISABLE_BIND;
+			} else if (!xstrcasecmp(optarg, "enforce-binding")) {
 				opt.job_flags |= GRES_ENFORCE_BIND;
 			} else {
 				error("Invalid gres-flags specification: %s",
@@ -2630,7 +2634,7 @@ static void _parse_pbs_resource_list(char *rl)
 								temp, true);
 				xfree(temp);
 			}
-#if defined(HAVE_ALPS_CRAY) || defined(HAVE_NATIVE_CRAY)
+#ifdef HAVE_NATIVE_CRAY
 			/*
 			 * NB: no "mppmem" here since it specifies per-PE memory units,
 			 *     whereas Slurm uses per-node and per-CPU memory units.
@@ -2672,7 +2676,7 @@ static void _parse_pbs_resource_list(char *rl)
 				opt.ntasks_set = true;
 			}
 			xfree(temp);
-#endif	/* HAVE_ALPS_CRAY || HAVE_NATIVE_CRAY */
+#endif /* HAVE_NATIVE_CRAY */
 		} else if (!xstrncasecmp(rl+i, "naccelerators=", 14)) {
 			i += 14;
 			temp = _get_pbs_option_value(rl, &i, ',');
@@ -3578,8 +3582,7 @@ static void _help(void)
 "      --ntasks-per-core=n     number of tasks to invoke on each core\n"
 "      --ntasks-per-socket=n   number of tasks to invoke on each socket\n");
 	conf = slurm_conf_lock();
-	if (conf->task_plugin != NULL
-	    && xstrcasecmp(conf->task_plugin, "task/affinity") == 0) {
+	if (xstrstr(conf->task_plugin, "affinity")) {
 		printf(
 "      --hint=                 Bind tasks according to application hints\n"
 "                              (see \"--hint=help\" for options)\n"

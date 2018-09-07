@@ -112,7 +112,7 @@ extern int common_node_config_load(List gres_conf_list,
 
 extern bool common_use_local_device_index(void)
 {
-	slurm_cgroup_conf_t slurm_cgroup_conf;
+	slurm_cgroup_conf_t *cg_conf;
 	char *task_plugin;
 	bool use_cgroup = false;
 	static bool use_local_index = false;
@@ -132,13 +132,12 @@ extern bool common_use_local_device_index(void)
 	if (!use_cgroup)
 		return use_local_index;
 
-	/* Read and parse cgroup.conf */
-	memset(&slurm_cgroup_conf, 0, sizeof(slurm_cgroup_conf_t));
-	if (read_slurm_cgroup_conf(&slurm_cgroup_conf) != SLURM_SUCCESS)
-		return use_local_index;
-	if (slurm_cgroup_conf.constrain_devices)
+	/* read cgroup configuration */
+	slurm_mutex_lock(&xcgroup_config_read_mutex);
+	cg_conf = xcgroup_get_slurm_cgroup_conf();
+	if (cg_conf->constrain_devices)
 		use_local_index = true;
-	free_slurm_cgroup_conf(&slurm_cgroup_conf);
+	slurm_mutex_unlock(&xcgroup_config_read_mutex);
 
 	return use_local_index;
 }
@@ -156,6 +155,8 @@ extern void common_gres_set_env(List gres_devices, char ***env_ptr,
 	bool alloc_cnt = false;
 	gres_device_t *gres_device, *first_device = NULL;
 	ListIterator itr;
+	char *global_prefix = "", *local_prefix = "";
+	char *new_global_list = NULL, *new_local_list = NULL;
 
 	if (!gres_devices)
 		return;
@@ -171,7 +172,6 @@ extern void common_gres_set_env(List gres_devices, char ***env_ptr,
 		    gres_job_ptr->gres_bit_alloc &&
 		    gres_job_ptr->gres_bit_alloc[node_inx]) {
 			bit_alloc = gres_job_ptr->gres_bit_alloc[node_inx];
-//FIXME: Change to total_gres check below once field is set
 		} else if (gres_job_ptr && (gres_job_ptr->gres_per_node > 0))
 			alloc_cnt = true;
 
@@ -183,7 +183,6 @@ extern void common_gres_set_env(List gres_devices, char ***env_ptr,
 		    gres_step_ptr->gres_bit_alloc &&
 		    gres_step_ptr->gres_bit_alloc[0]) {
 			bit_alloc = gres_step_ptr->gres_bit_alloc[0];
-//FIXME: Change to total_gres check below once field is set
 		} else if (gres_step_ptr && (gres_step_ptr->gres_per_node > 0))
 			alloc_cnt = true;
 	}
@@ -212,30 +211,36 @@ extern void common_gres_set_env(List gres_devices, char ***env_ptr,
 				if (!bit_test(usable_gres, i))
 					continue;
 			}
-			if (*global_list) {
-				xstrcat(*global_list, ",");
-				xstrcat(*local_list,  ",");
-			}
-
-			xstrfmtcat(*local_list, "%s%d",
+			xstrfmtcat(new_local_list, "%s%s%d", local_prefix,
 				   prefix, use_local_dev_index ?
 				   (*local_inx)++ : gres_device->dev_num);
+			local_prefix = ",";
 			//info("looking at %d and %d", i, gres_device->dev_num);
-			xstrfmtcat(*global_list, "%s%d",
+			xstrfmtcat(new_global_list, "%s%s%d", global_prefix,
 				   prefix, gres_device->dev_num);
+			global_prefix = ",";
 		}
 		list_iterator_destroy(itr);
-
-		if (reset && !*global_list && first_device) {
-			xstrfmtcat(*local_list, "%s%d",
+		if (reset && !new_global_list && first_device) {
+			xstrfmtcat(new_local_list, "%s%s%d", local_prefix,
 				   prefix, use_local_dev_index ?
 				   (*local_inx)++ : first_device->dev_num);
-			xstrfmtcat(*global_list, "%s%d",
+			xstrfmtcat(new_global_list, "%s%s%d", global_prefix,
 				   prefix, first_device->dev_num);
 		}
+		if (new_global_list) {
+			xfree(*global_list);
+			*global_list = new_global_list;
+		}
+		if (new_local_list) {
+			xfree(*local_list);
+			*local_list = new_local_list;
+		}
 	} else if (alloc_cnt) {
-		/* The gres.conf file must identify specific device files
-		 * in order to set the CUDA_VISIBLE_DEVICES env var */
+		/*
+		 * The gres.conf file must identify specific device files
+		 * in order to set the CUDA_VISIBLE_DEVICES env var
+		 */
 		debug("%s: unable to set env vars, no device files configured",
 		      __func__);
 	} else if (!*global_list) {
@@ -314,12 +319,12 @@ extern void common_recv_stepd(int fd, List *gres_devices)
 		safe_read(fd, &gres_device->dev_num, sizeof(int));
 		safe_read(fd, &len, sizeof(int));
 		if (len) {
-			gres_device->major = xmalloc(sizeof(char) * (len + 1));
+			gres_device->major = xmalloc(len + 1);
 			safe_read(fd, gres_device->major, len);
 		}
 		safe_read(fd, &len, sizeof(int));
 		if (len) {
-			gres_device->path = xmalloc(sizeof(char) * (len + 1));
+			gres_device->path = xmalloc(len + 1);
 			safe_read(fd, gres_device->path, len);
 		}
 		/* info("adding %d %s %s", gres_device->dev_num, */

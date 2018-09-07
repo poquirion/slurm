@@ -101,14 +101,11 @@ const char *node_select_syms[] = {
 	"select_p_select_jobinfo_unpack",
 	"select_p_select_jobinfo_sprint",
 	"select_p_select_jobinfo_xstrdup",
-	"select_p_update_basil",
 	"select_p_get_info_from_plugin",
 	"select_p_update_node_config",
 	"select_p_update_node_state",
 	"select_p_reconfigure",
 	"select_p_resv_test",
-	"select_p_ba_init",
-	"select_p_ba_get_dims",
 };
 
 static int select_context_cnt = -1;
@@ -178,21 +175,6 @@ extern int slurm_select_init(bool only_default)
 	if (working_cluster_rec) {
 		/* just ignore warnings here */
 	} else {
-#ifdef HAVE_ALPS_CRAY
-		if (xstrcasecmp(select_type, "select/alps")) {
-			error("%s is incompatible with Cray system "
-			      "running alps", select_type);
-			fatal("Use SelectType=select/alps");
-		}
-#else
-		if (!xstrcasecmp(select_type, "select/alps")) {
-			fatal("Requested SelectType=select/alps "
-			      "in slurm.conf, but not running on a ALPS Cray "
-			      "system.  If looking to emulate a Alps Cray "
-			      "system use --enable-alps-cray-emulation.");
-		}
-#endif
-
 #ifdef HAVE_NATIVE_CRAY
 		if (xstrcasecmp(select_type, "select/cray")) {
 			error("%s is incompatible with a native Cray system.",
@@ -1117,17 +1099,6 @@ extern char *select_g_select_jobinfo_xstrdup(
 }
 
 /*
- * Update basil in select/alps
- */
-extern int select_g_update_basil(void)
-{
-	if (slurm_select_init(0) < 0)
-		return SLURM_ERROR;
-
-	return (*(ops[select_context_default].update_basil))();
-}
-
-/*
  * Get select data from a plugin
  * IN dinfo     - type of data to get from the node record
  *                (see enum select_plugindata_info)
@@ -1210,34 +1181,4 @@ extern bitstr_t * select_g_resv_test(resv_desc_msg_t *resv_desc_ptr,
 
 	return (*(ops[select_context_default].resv_test))
 		(resv_desc_ptr, node_cnt, avail_bitmap, core_bitmap);
-}
-
-extern void select_g_ba_init(node_info_msg_t *node_info_ptr, bool sanity_check)
-{
-	uint32_t plugin_id;
-
-	if (slurm_select_init(0) < 0)
-		return;
-
-	if (working_cluster_rec)
-		plugin_id = working_cluster_rec->plugin_id_select;
-	else
-		plugin_id = select_context_default;
-
-	(*(ops[plugin_id].ba_init))(node_info_ptr, sanity_check);
-}
-
-extern int *select_g_ba_get_dims(void)
-{
-	uint32_t plugin_id;
-
-	if (slurm_select_init(0) < 0)
-		return NULL;
-
-	if (working_cluster_rec)
-		plugin_id = working_cluster_rec->plugin_id_select;
-	else
-		plugin_id = select_context_default;
-
-	return (*(ops[plugin_id].ba_get_dims))();
 }

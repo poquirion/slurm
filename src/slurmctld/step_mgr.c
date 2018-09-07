@@ -174,7 +174,7 @@ static struct step_record * _create_step_record(struct job_record *job_ptr,
 	 * special step that may come our way. */
 	if (job_ptr->next_step_id >= 0xfffffff0) {
 		/* avoid step records in the accounting database */
-		info("job %u has reached step id limit", job_ptr->job_id);
+		info("%pJ has reached step id limit", job_ptr);
 		return NULL;
 	}
 
@@ -191,6 +191,7 @@ static struct step_record * _create_step_record(struct job_record *job_ptr,
 	else
 		step_ptr->start_protocol_ver = job_ptr->start_protocol_ver;
 
+	step_ptr->magic = STEP_MAGIC;
 	(void) list_append (job_ptr->step_list, step_ptr);
 
 	return step_ptr;
@@ -373,6 +374,8 @@ extern void step_list_purge(struct job_record *job_ptr)
 /* _free_step_rec - delete a step record's data structures */
 static void _free_step_rec(struct step_record *step_ptr)
 {
+	xassert(step_ptr);
+	xassert(step_ptr->magic == STEP_MAGIC);
 /*
  * FIXME: If job step record is preserved after completion,
  * the switch_g_job_step_complete() must be called upon completion
@@ -473,14 +476,12 @@ dump_step_desc(job_step_create_request_msg_t *step_spec)
 	}
 
 	if (slurmctld_conf.debug_flags & DEBUG_FLAG_CPU_FREQ) {
-		info("StepDesc: user_id=%u job_id=%u "
-		     "cpu_freq_gov=%u cpu_freq_max=%u cpu_freq_min=%u",
+		info("StepDesc: user_id=%u JobId=%u cpu_freq_gov=%u cpu_freq_max=%u cpu_freq_min=%u",
 		     step_spec->user_id, step_spec->job_id,
 		     step_spec->cpu_freq_gov, step_spec->cpu_freq_max,
 		     step_spec->cpu_freq_min);
 	}
-	debug3("StepDesc: user_id=%u job_id=%u step_id=%u node_count=%u-%u "
-	       "cpu_count=%u num_tasks=%u",
+	debug3("StepDesc: user_id=%u JobId=%u StepId=%u node_count=%u-%u cpu_count=%u num_tasks=%u",
 	       step_spec->user_id, step_spec->job_id, step_spec->step_id,
 	       step_spec->min_nodes, step_spec->max_nodes,
 	       step_spec->cpu_count, step_spec->num_tasks);
@@ -511,7 +512,7 @@ dump_step_desc(job_step_create_request_msg_t *step_spec)
 	if (step_spec->tres_freq)
 		debug3("   TRES_freq=%s", step_spec->tres_freq);
 	if (step_spec->tres_per_step)
-		debug3("   tres_per_step=%s", step_spec->tres_per_step);
+		debug3("   TRES_per_step=%s", step_spec->tres_per_step);
 	if (step_spec->tres_per_node)
 		debug3("   TRES_per_node=%s", step_spec->tres_per_node);
 	if (step_spec->tres_per_socket)
@@ -580,7 +581,7 @@ int job_step_signal(uint32_t job_id, uint32_t step_id,
 
 	job_ptr = find_job_record(job_id);
 	if (job_ptr == NULL) {
-		error("job_step_signal: invalid job id %u", job_id);
+		error("job_step_signal: invalid JobId=%u", job_id);
 		return ESLURM_INVALID_JOB_ID;
 	}
 
@@ -595,8 +596,8 @@ int job_step_signal(uint32_t job_id, uint32_t step_id,
 		if (signal != SIG_NODE_FAIL)
 			return rc;
 	} else if (!IS_JOB_RUNNING(job_ptr)) {
-		verbose("job_step_signal: step %u.%u can not be sent signal "
-			"%u from state=%s", job_id, step_id, signal,
+		verbose("job_step_signal: %pJ StepId=%u can not be sent signal %u from state=%s",
+			job_ptr, step_id, signal,
 			job_state_string(job_ptr->job_state));
 		if (signal != SIG_NODE_FAIL)
 			return ESLURM_TRANSITION_STATE_NO_UPDATE;
@@ -605,23 +606,22 @@ int job_step_signal(uint32_t job_id, uint32_t step_id,
 	step_ptr = find_step_record(job_ptr, step_id);
 	if (step_ptr == NULL) {
 		if (signal != SIG_NODE_FAIL) {
-			info("job_step_signal step %u.%u not found",
-			     job_id, step_id);
+			info("job_step_signal %pJ StepId=%u not found",
+			     job_ptr, step_id);
 			return ESLURM_INVALID_JOB_ID;
 		}
 		if (job_ptr->node_bitmap == NULL) {
 			/* Job state has already been cleared for requeue.
 			 * This indicates that all nodes are already down.
 			 * Rely upon real-time server to manage cnodes state */
-			info("%s: job %u already requeued, can not down cnodes",
-			     __func__, job_id);
+			info("%s: %pJ already requeued, can not down cnodes",
+			     __func__, job_ptr);
 			return ESLURM_ALREADY_DONE;
 		}
 		/* If we get a node fail signal, down the cnodes to avoid
 		 * allocating them to another job. */
-		debug("job_step_signal step %u.%u not found, but got "
-		      "SIG_NODE_FAIL, so failing all nodes in allocation.",
-		      job_id, step_id);
+		debug("job_step_signal %pJ StepId=%u not found, but got SIG_NODE_FAIL, so failing all nodes in allocation.",
+		      job_ptr, step_id);
 		memset(&step_rec, 0, sizeof(struct step_record));
 		step_rec.step_id = NO_VAL;
 		step_rec.job_ptr = job_ptr;
@@ -847,7 +847,7 @@ int job_step_complete(uint32_t job_id, uint32_t step_id, uid_t uid,
 
 	job_ptr = find_job_record(job_id);
 	if (job_ptr == NULL) {
-		info("job_step_complete: invalid job id %u", job_id);
+		info("job_step_complete: invalid JobId=%u", job_id);
 		return ESLURM_INVALID_JOB_ID;
 	}
 
@@ -870,9 +870,8 @@ int job_step_complete(uint32_t job_id, uint32_t step_id, uid_t uid,
 				    SELECT_JOBDATA_CLEANING,
 				    &cleaning);
 	if (cleaning) {	/* Step hasn't finished cleanup yet. */
-		debug("%s: Cleaning flag already set for "
-		      "job step %u.%u, no reason to cleanup again.",
-		      __func__, job_ptr->job_id, step_ptr->step_id);
+		debug("%s: Cleaning flag already set for %pS, no reason to cleanup again.",
+		      __func__, step_ptr);
 		return SLURM_SUCCESS;
 	}
 
@@ -1020,7 +1019,7 @@ _pick_step_nodes (struct job_record  *job_ptr,
 	int cpu_cnt, i, task_cnt;
 	int mem_blocked_nodes = 0, mem_blocked_cpus = 0;
 	ListIterator step_iterator;
-	struct step_record *step_p;
+	struct step_record *step_ptr;
 	job_resources_t *job_resrcs_ptr = job_ptr->job_resrcs;
 	uint32_t *usable_cpu_cnt = NULL;
 
@@ -1068,8 +1067,8 @@ _pick_step_nodes (struct job_record  *job_ptr,
 	if (step_spec->pn_min_memory &&
 	    ((job_resrcs_ptr->memory_allocated == NULL) ||
 	     (job_resrcs_ptr->memory_used == NULL))) {
-		error("_pick_step_nodes: job lacks memory allocation details "
-		      "to enforce memory limits for job %u", job_ptr->job_id);
+		error("_pick_step_nodes: job lacks memory allocation details to enforce memory limits for %pJ",
+		      job_ptr);
 		step_spec->pn_min_memory = 0;
 	} else if (step_spec->pn_min_memory == MEM_PER_CPU)
 		step_spec->pn_min_memory = 0;	/* clear MEM_PER_CPU flag */
@@ -1098,8 +1097,8 @@ _pick_step_nodes (struct job_record  *job_ptr,
 			}
 		}
 		if (IS_JOB_CONFIGURING(job_ptr)) {
-			info("%s: Configuration for job %u is complete",
-			      __func__, job_ptr->job_id);
+			info("%s: Configuration for %pJ is complete",
+			      __func__, job_ptr);
 			job_config_fini(job_ptr);
 			if (job_ptr->bit_flags & NODE_REBOOT)
 				job_validate_mem(job_ptr);
@@ -1124,17 +1123,15 @@ _pick_step_nodes (struct job_record  *job_ptr,
 						      false,
 						      &selected_nodes);
 			if (error_code) {
-				info("_pick_step_nodes: invalid node list (%s) "
-				     "for job step %u",
-				     step_spec->node_list, job_ptr->job_id);
+				info("%s: invalid node list (%s) for %pJ",
+				     __func__, step_spec->node_list, job_ptr);
 				FREE_NULL_BITMAP(selected_nodes);
 				goto cleanup;
 			}
 			if (!bit_super_set(selected_nodes,
 					   job_ptr->node_bitmap)) {
-				info("_pick_step_nodes: selected nodes (%s) "
-				     "not in job %u",
-				     step_spec->node_list, job_ptr->job_id);
+				info("%s: selected nodes (%s) not in %pJ",
+				     __func__, step_spec->node_list, job_ptr);
 				FREE_NULL_BITMAP(selected_nodes);
 				goto cleanup;
 			}
@@ -1374,25 +1371,23 @@ _pick_step_nodes (struct job_record  *job_ptr,
 				}
 			}
 
-			if (step_spec->tres_per_node) {
-				/* ignore current step allocations */
-				tmp_cpus = gres_plugin_step_test(step_gres_list,
-							job_ptr->gres_list,
-							node_inx, true,
-							job_ptr->job_id,
-							NO_VAL);
-				total_cpus = MIN(total_cpus, tmp_cpus);
-				/* consider current step allocations */
-				tmp_cpus = gres_plugin_step_test(step_gres_list,
-							job_ptr->gres_list,
-							node_inx, false,
-							job_ptr->job_id,
-							NO_VAL);
-				if (tmp_cpus < avail_cpus) {
-					avail_cpus = tmp_cpus;
-					usable_cpu_cnt[i] = avail_cpus;
-					fail_mode = ESLURM_INVALID_GRES;
-				}
+			/* ignore current step allocations */
+			tmp_cpus = gres_plugin_step_test(step_gres_list,
+							 job_ptr->gres_list,
+							 node_inx, true,
+							 job_ptr->job_id,
+							 NO_VAL);
+			total_cpus = MIN(total_cpus, tmp_cpus);
+			/* consider current step allocations */
+			tmp_cpus = gres_plugin_step_test(step_gres_list,
+							 job_ptr->gres_list,
+							 node_inx, false,
+							 job_ptr->job_id,
+							 NO_VAL);
+			if (tmp_cpus < avail_cpus) {
+				avail_cpus = tmp_cpus;
+				usable_cpu_cnt[i] = avail_cpus;
+				fail_mode = ESLURM_INVALID_GRES;
 			}
 
 			avail_tasks = avail_cpus;
@@ -1450,9 +1445,8 @@ _pick_step_nodes (struct job_record  *job_ptr,
 			goto cleanup;
 		}
 		if (!bit_super_set(selected_nodes, job_ptr->node_bitmap)) {
-			info ("_pick_step_nodes: requested nodes %s not part "
-				"of job %u",
-				step_spec->node_list, job_ptr->job_id);
+			info("%s: requested nodes %s not part of %pJ",
+			     __func__, step_spec->node_list, job_ptr);
 			FREE_NULL_BITMAP(selected_nodes);
 			goto cleanup;
 		}
@@ -1464,9 +1458,8 @@ _pick_step_nodes (struct job_record  *job_ptr,
 			 */
 			if (mem_blocked_nodes == 0) {
 				*return_code = ESLURM_INVALID_TASK_MEMORY;
-				info ("_pick_step_nodes: requested nodes %s "
-				      "have inadequate memory",
-				      step_spec->node_list);
+				info("%s: requested nodes %s have inadequate memory",
+				     __func__, step_spec->node_list);
 			} else {
 				*return_code = ESLURM_NODES_BUSY;
 				info ("_pick_step_nodes: some requested nodes"
@@ -1494,10 +1487,9 @@ _pick_step_nodes (struct job_record  *job_ptr,
 			 */
 			node_cnt = bit_set_count(selected_nodes);
 			if (node_cnt > step_spec->max_nodes) {
-				info("%s: requested nodes %s exceed max node count for job step %u (%d > %u)",
-				     __func__, step_spec->node_list,
-				     job_ptr->job_id, node_cnt,
-				     step_spec->max_nodes);
+				info("%s: requested nodes %s exceed max node count for %pJ (%d > %u)",
+				     __func__, step_spec->node_list, job_ptr,
+				     node_cnt, step_spec->max_nodes);
 				FREE_NULL_BITMAP(selected_nodes);
 				goto cleanup;
 			} else if (step_spec->min_nodes &&
@@ -1526,9 +1518,8 @@ _pick_step_nodes (struct job_record  *job_ptr,
 		relative_nodes = bit_pick_cnt(job_ptr->node_bitmap,
 					      step_spec->relative);
 		if (relative_nodes == NULL) {
-			info ("_pick_step_nodes: "
-			      "Invalid relative value (%u) for job %u",
-			      step_spec->relative, job_ptr->job_id);
+			info("%s: Invalid relative value (%u) for %pJ",
+			     __func__, step_spec->relative, job_ptr);
 			goto cleanup;
 		}
 		bit_and_not(nodes_avail, relative_nodes);
@@ -1536,17 +1527,16 @@ _pick_step_nodes (struct job_record  *job_ptr,
 	} else {
 		nodes_idle = bit_alloc (bit_size (nodes_avail) );
 		step_iterator = list_iterator_create(job_ptr->step_list);
-		while ((step_p = (struct step_record *)
+		while ((step_ptr = (struct step_record *)
 			list_next(step_iterator))) {
-			if (step_p->state < JOB_RUNNING)
+			if (step_ptr->state < JOB_RUNNING)
 				continue;
-			bit_or(nodes_idle, step_p->step_node_bitmap);
+			bit_or(nodes_idle, step_ptr->step_node_bitmap);
 			if (slurmctld_conf.debug_flags & DEBUG_FLAG_STEPS) {
 				char *temp;
-				temp = bitmap2node_name(step_p->
+				temp = bitmap2node_name(step_ptr->
 							step_node_bitmap);
-				info("step %u.%u has nodes %s",
-				     job_ptr->job_id, step_p->step_id, temp);
+				info("%pS has nodes %s", step_ptr, temp);
 				xfree(temp);
 			}
 		}
@@ -1582,8 +1572,8 @@ _pick_step_nodes (struct job_record  *job_ptr,
 		step_spec->min_nodes = (i > step_spec->min_nodes) ?
 					i : step_spec->min_nodes ;
 		if (step_spec->max_nodes < step_spec->min_nodes) {
-			info("%s: Job step %u max node less than min node count (%u < %u)",
-			     __func__, job_ptr->job_id, step_spec->max_nodes,
+			info("%s: %pJ max node less than min node count (%u < %u)",
+			     __func__, job_ptr, step_spec->max_nodes,
 			     step_spec->min_nodes);
 			*return_code = ESLURM_TOO_MANY_REQUESTED_CPUS;
 			goto cleanup;
@@ -1822,7 +1812,7 @@ static int _count_cpus(struct job_record *job_ptr, bitstr_t *bitmap,
 				sum += job_ptr->job_resrcs->cpus[node_inx];
 		}
 	} else {
-		error("job %u lacks cpus array", job_ptr->job_id);
+		error("%pJ lacks cpus array", job_ptr);
 		for (i = 0, node_ptr = node_record_table_ptr;
 		     i < node_record_count; i++, node_ptr++) {
 			if (!bit_test(bitmap, i))
@@ -1925,20 +1915,6 @@ static void _pick_step_cores(struct step_record *step_ptr,
 	}
 }
 
-#ifdef HAVE_ALPS_CRAY
-/* Return the total cpu count on a given node index */
-static int _get_node_cpus(int node_inx)
-{
-	struct node_record *node_ptr;
-
-	node_ptr = node_record_table_ptr + node_inx;
-	if (slurmctld_conf.fast_schedule)
-		return node_ptr->config_ptr->cpus;
-
-	return node_ptr->cpus;
-}
-#endif
-
 /* Update a job's record of allocated CPUs when a job step gets scheduled */
 extern void step_alloc_lps(struct step_record *step_ptr)
 {
@@ -1978,8 +1954,8 @@ extern void step_alloc_lps(struct step_record *step_ptr)
 	if (step_ptr->pn_min_memory && _is_mem_resv() &&
 	    ((job_resrcs_ptr->memory_allocated == NULL) ||
 	     (job_resrcs_ptr->memory_used == NULL))) {
-		error("step_alloc_lps: lack memory allocation details "
-		      "to enforce memory limits for job %u", job_ptr->job_id);
+		error("%s: lack memory allocation details to enforce memory limits for %pJ",
+		      __func__, job_ptr);
 		step_ptr->pn_min_memory = 0;
 	}
 
@@ -1992,17 +1968,11 @@ extern void step_alloc_lps(struct step_record *step_ptr)
 		step_node_inx++;
 		if (job_node_inx >= job_resrcs_ptr->nhosts)
 			fatal("step_alloc_lps: node index bad");
-#ifdef HAVE_ALPS_CRAY
-		/* Since with alps cray you can only run 1 job per node
-		   return all CPUs as being allocated.
-		*/
-		cpus_alloc = _get_node_cpus(step_node_inx);
-#else
+
 		/* NOTE: The --overcommit option can result in
 		 * cpus_used[] having a higher value than cpus[] */
 		cpus_alloc = step_ptr->step_layout->tasks[step_node_inx] *
 			     step_ptr->cpus_per_task;
-#endif
 		job_resrcs_ptr->cpus_used[job_node_inx] += cpus_alloc;
 		gres_plugin_step_alloc(step_ptr->gres_list, job_ptr->gres_list,
 				       job_node_inx, job_ptr->job_id,
@@ -2054,7 +2024,7 @@ static void _dump_step_layout(struct step_record *step_ptr)
 		return;
 
 	info("====================");
-	info("step_id:%u.%u", job_ptr->job_id, step_ptr->step_id);
+	info("%pS", step_ptr);
 	for (i=0, bit_inx=0, node_inx=0; node_inx<job_resrcs_ptr->nhosts; i++) {
 		for (rep=0; rep<job_resrcs_ptr->sock_core_rep_count[i]; rep++) {
 			for (sock_inx=0;
@@ -2105,8 +2075,8 @@ static void _step_dealloc_lps(struct step_record *step_ptr)
 	if (step_ptr->pn_min_memory && _is_mem_resv() &&
 	    ((job_resrcs_ptr->memory_allocated == NULL) ||
 	     (job_resrcs_ptr->memory_used == NULL))) {
-		error("_step_dealloc_lps: lack memory allocation details "
-		      "to enforce memory limits for job %u", job_ptr->job_id);
+		error("%s: lack memory allocation details to enforce memory limits for %pJ",
+		      __func__, job_ptr);
 		step_ptr->pn_min_memory = 0;
 	}
 
@@ -2119,20 +2089,13 @@ static void _step_dealloc_lps(struct step_record *step_ptr)
 		step_node_inx++;
 		if (job_node_inx >= job_resrcs_ptr->nhosts)
 			fatal("_step_dealloc_lps: node index bad");
-#ifdef HAVE_ALPS_CRAY
-		/* Since with alps cray you can only run 1 job per node
-		   return all CPUs as being allocated.
-		*/
-		cpus_alloc = _get_node_cpus(step_node_inx);
-#else
 		cpus_alloc = step_ptr->step_layout->tasks[step_node_inx] *
 			     step_ptr->cpus_per_task;
-#endif
 		if (job_resrcs_ptr->cpus_used[job_node_inx] >= cpus_alloc) {
 			job_resrcs_ptr->cpus_used[job_node_inx] -= cpus_alloc;
 		} else {
-			error("%s: CPU underflow for %u.%u (%u<%u on job node %d)",
-			      __func__, job_ptr->job_id, step_ptr->step_id,
+			error("%s: CPU underflow for %pS (%u<%u on job node %d)",
+			      __func__, step_ptr,
 			      job_resrcs_ptr->cpus_used[job_node_inx],
 			      cpus_alloc, job_node_inx);
 			job_resrcs_ptr->cpus_used[job_node_inx] = 0;
@@ -2155,9 +2118,8 @@ static void _step_dealloc_lps(struct step_record *step_ptr)
 				job_resrcs_ptr->memory_used[job_node_inx] -=
 						mem_use;
 			} else {
-				error("_step_dealloc_lps: "
-				      "mem underflow for %u.%u",
-				      job_ptr->job_id, step_ptr->step_id);
+				error("%s: mem underflow for %pS",
+				      __func__, step_ptr);
 				job_resrcs_ptr->memory_used[job_node_inx] = 0;
 			}
 		}
@@ -2179,9 +2141,9 @@ static void _step_dealloc_lps(struct step_record *step_ptr)
 		job_core_size  = bit_size(job_resrcs_ptr->core_bitmap_used);
 		step_core_size = bit_size(step_ptr->core_bitmap_job);
 		if (job_core_size != step_core_size) {
-			error("%s: %u.%u core_bitmap size mismatch (%d != %d)",
-			      __func__, job_ptr->job_id, step_ptr->step_id,
-			      job_core_size, step_core_size);
+			error("%s: %pS core_bitmap size mismatch (%d != %d)",
+			      __func__, step_ptr, job_core_size,
+			      step_core_size);
 		} else {
 			bit_and_not(job_resrcs_ptr->core_bitmap_used,
 				    step_ptr->core_bitmap_job);
@@ -2348,12 +2310,7 @@ step_create(job_step_create_request_msg_t *step_specs,
 	List step_gres_list = (List) NULL;
 	dynamic_plugin_data_t *select_jobinfo = NULL;
 	uint32_t task_dist;
-
-#ifdef HAVE_ALPS_CRAY
-	uint32_t resv_id = 0;
-#else
 	uint32_t max_tasks;
-#endif
 	*new_step_record = NULL;
 	job_ptr = find_job_record (step_specs->job_id);
 	if (job_ptr == NULL)
@@ -2383,8 +2340,8 @@ step_create(job_step_create_request_msg_t *step_specs,
 	}
 
 	if (batch_step) {
-		info("user %u attempting to run batch script within existing job %u",
-		     step_specs->user_id, step_specs->job_id);
+		info("user %u attempting to run batch script within existing %pJ",
+		     step_specs->user_id, job_ptr);
 		/* This seems hazardous to allow, but LSF seems to
 		 * work this way, so don't treat it as an error. */
 	}
@@ -2453,11 +2410,6 @@ step_create(job_step_create_request_msg_t *step_specs,
 	if (job_ptr->next_step_id >= slurmctld_conf.max_step_cnt)
 		return ESLURM_STEP_LIMIT;
 
-#ifdef HAVE_ALPS_CRAY
-	select_g_select_jobinfo_get(job_ptr->select_jobinfo,
-				    SELECT_JOBDATA_RESV_ID, &resv_id);
-#endif
-
 	/* if the overcommit flag is checked, we 0 set cpu_count=0
 	 * which makes it so we don't check to see the available cpus
 	 */
@@ -2517,10 +2469,6 @@ step_create(job_step_create_request_msg_t *step_specs,
 	}
 	_set_def_cpu_bind(job_ptr);
 
-#ifdef HAVE_ALPS_CRAY
-	select_g_select_jobinfo_set(select_jobinfo,
-				    SELECT_JOBDATA_RESV_ID, &resv_id);
-#endif
 	node_count = bit_set_count(nodeset);
 	if (step_specs->num_tasks == NO_VAL) {
 		if (step_specs->cpu_count != NO_VAL)
@@ -2529,7 +2477,6 @@ step_create(job_step_create_request_msg_t *step_specs,
 			step_specs->num_tasks = node_count;
 	}
 
-#if (!defined HAVE_ALPS_CRAY)
 	max_tasks = node_count * slurmctld_conf.max_tasks_per_node;
 	if (step_specs->num_tasks > max_tasks) {
 		error("step has invalid task count: %u max is %u",
@@ -2539,7 +2486,7 @@ step_create(job_step_create_request_msg_t *step_specs,
 		select_g_select_jobinfo_free(select_jobinfo);
 		return ESLURM_BAD_TASK_COUNT;
 	}
-#endif
+
 	step_ptr = _create_step_record(job_ptr, protocol_version);
 	if (step_ptr == NULL) {
 		FREE_NULL_LIST(step_gres_list);
@@ -2663,8 +2610,8 @@ step_create(job_step_create_request_msg_t *step_specs,
 		/* enforce partition limits if necessary */
 		if ((step_specs->time_limit > job_ptr->part_ptr->max_time) &&
 		    slurmctld_conf.enforce_part_limits) {
-			info("_step_create: step time greater than partition's "
-			     "(%u > %u)", step_specs->time_limit,
+			info("%s: %pS time greater than partition's (%u > %u)",
+			     __func__, step_ptr, step_specs->time_limit,
 			     job_ptr->part_ptr->max_time);
 			delete_step_record(job_ptr, step_ptr->step_id);
 			xfree(step_node_list);
@@ -2781,8 +2728,8 @@ extern slurm_step_layout_t *step_layout_create(struct step_record *step_ptr,
 	if (step_ptr->pn_min_memory && _is_mem_resv() &&
 	    ((job_resrcs_ptr->memory_allocated == NULL) ||
 	     (job_resrcs_ptr->memory_used == NULL))) {
-		error("%s: lack memory allocation details to enforce memory limits for job %u",
-		       __func__, job_ptr->job_id);
+		error("%s: lack memory allocation details to enforce memory limits for %pJ",
+		       __func__, job_ptr);
 		step_ptr->pn_min_memory = 0;
 	} else if (step_ptr->pn_min_memory == MEM_PER_CPU)
 		step_ptr->pn_min_memory = 0;	/* clear MEM_PER_CPU flag */
@@ -3007,7 +2954,7 @@ static void _pack_ctld_job_step_info(struct step_record *step_ptr, Buf buffer,
 	time_t begin_time, run_time;
 	bitstr_t *pack_bitstr;
 
-#if defined HAVE_FRONT_END && (!defined HAVE_ALPS_CRAY)
+#if defined HAVE_FRONT_END
 	/* On front-end systems, the steps only execute on one node.
 	 * We need to make them appear like they are running on the job's
 	 * entire allocation (which they really are). */
@@ -3089,7 +3036,7 @@ static void _pack_ctld_job_step_info(struct step_record *step_ptr, Buf buffer,
 		packstr(step_ptr->tres_per_node, buffer);
 		packstr(step_ptr->tres_per_socket, buffer);
 		packstr(step_ptr->tres_per_task, buffer);
-	} else if (protocol_version >= SLURM_17_11_PROTOCOL_VERSION) {
+	} else if (protocol_version >= SLURM_MIN_PROTOCOL_VERSION) {
 		pack32(step_ptr->job_ptr->array_job_id, buffer);
 		pack32(step_ptr->job_ptr->array_task_id, buffer);
 		pack32(step_ptr->job_ptr->job_id, buffer);
@@ -3137,55 +3084,6 @@ static void _pack_ctld_job_step_info(struct step_record *step_ptr, Buf buffer,
 					     protocol_version);
 		packstr(step_ptr->tres_fmt_alloc_str, buffer);
 		pack16(step_ptr->start_protocol_ver, buffer);
-	} else if (protocol_version >= SLURM_MIN_PROTOCOL_VERSION) {
-		pack32(step_ptr->job_ptr->array_job_id, buffer);
-		pack32(step_ptr->job_ptr->array_task_id, buffer);
-		pack32(step_ptr->job_ptr->job_id, buffer);
-		pack32(step_ptr->step_id, buffer);
-		pack16(step_ptr->ckpt_interval, buffer);
-		pack32(step_ptr->job_ptr->user_id, buffer);
-		pack32(cpu_cnt, buffer);
-		pack32(step_ptr->cpu_freq_min, buffer);
-		pack32(step_ptr->cpu_freq_max, buffer);
-		pack32(step_ptr->cpu_freq_gov, buffer);
-		pack32(task_cnt, buffer);
-		if (step_ptr->step_layout)
-			pack32(step_ptr->step_layout->task_dist, buffer);
-		else
-			pack32((uint32_t) SLURM_DIST_UNKNOWN, buffer);
-		pack32(step_ptr->time_limit, buffer);
-		pack32(step_ptr->state, buffer);
-		pack32(step_ptr->srun_pid, buffer);
-
-		pack_time(step_ptr->start_time, buffer);
-		if (IS_JOB_SUSPENDED(step_ptr->job_ptr)) {
-			run_time = step_ptr->pre_sus_time;
-		} else {
-			begin_time = MAX(step_ptr->start_time,
-					 step_ptr->job_ptr->suspend_time);
-			run_time = step_ptr->pre_sus_time +
-				difftime(time(NULL), begin_time);
-		}
-		pack_time(run_time, buffer);
-
-		if (step_ptr->job_ptr->part_ptr)
-			packstr(step_ptr->job_ptr->part_ptr->name, buffer);
-		else
-			packstr(step_ptr->job_ptr->partition, buffer);
-		packstr(step_ptr->host, buffer);
-		packstr(step_ptr->resv_ports, buffer);
-		packstr(node_list, buffer);
-		packstr(step_ptr->name, buffer);
-		packstr(step_ptr->network, buffer);
-		pack_bit_str_hex(pack_bitstr, buffer);
-		packstr(step_ptr->ckpt_dir, buffer);
-		packstr(step_ptr->tres_per_node, buffer);
-		select_g_select_jobinfo_pack(step_ptr->select_jobinfo, buffer,
-					     protocol_version);
-		packstr(step_ptr->tres_fmt_alloc_str, buffer);
-		pack16(step_ptr->start_protocol_ver, buffer);
-		pack32((uint32_t) 0, buffer);
-		pack32((uint32_t) 0, buffer);
 	} else {
 		error("%s: protocol_version %hu not supported", __func__,
 		      protocol_version);
@@ -3294,8 +3192,7 @@ extern int kill_step_on_node(struct job_record  *job_ptr,
 			continue;
 		if (node_fail && !step_ptr->no_kill)
 			srun_step_complete(step_ptr);
-		info("killing step %u.%u on node %s",
-		     job_ptr->job_id, step_ptr->step_id, node_ptr->name);
+		info("killing %pS on node %s", step_ptr, node_ptr->name);
 		signal_step_tasks_on_node(node_ptr->name, step_ptr, SIGKILL,
 					  REQUEST_TERMINATE_TASKS);
 		found++;
@@ -3520,7 +3417,7 @@ extern int step_partial_comp(step_complete_msg_t *req, uid_t uid,
 	/* find the job, step, and validate input */
 	job_ptr = find_job_record (req->job_id);
 	if (job_ptr == NULL) {
-		info("step_partial_comp: JobID=%u invalid", req->job_id);
+		info("%s: JobId=%u invalid", __func__, req->job_id);
 		return ESLURM_INVALID_JOB_ID;
 	}
 
@@ -3529,23 +3426,22 @@ extern int step_partial_comp(step_complete_msg_t *req, uid_t uid,
 	 * which won't see the completing flag.
 	 */
 	if (job_ptr->job_state == JOB_PENDING) {
-		info("step_partial_comp: JobID=%u pending", req->job_id);
+		info("%s: %pJ pending", __func__, job_ptr);
 		return ESLURM_JOB_PENDING;
 	}
 
 	if ((!validate_slurm_user(uid)) && (uid != job_ptr->user_id)) {
 		/* Normally from slurmstepd, from srun on some failures */
-		error("Security violation: "
-		      "REQUEST_STEP_COMPLETE RPC for job %u from uid=%u",
-		      job_ptr->job_id, (unsigned int) uid);
+		error("Security violation: REQUEST_STEP_COMPLETE RPC for %pJ from uid=%u",
+		      job_ptr, (unsigned int) uid);
 		return ESLURM_USER_ID_MISSING;
 	}
 
 	step_ptr = find_step_record(job_ptr, req->job_step_id);
 
 	if (step_ptr == NULL) {
-		info("step_partial_comp: StepID=%u.%u invalid",
-		     req->job_id, req->job_step_id);
+		info("step_partial_comp: %pJ StepID=%u invalid",
+		     job_ptr, req->job_step_id);
 		return ESLURM_INVALID_JOB_ID;
 	}
 	if (step_ptr->batch_step) {
@@ -3562,9 +3458,8 @@ extern int step_partial_comp(step_complete_msg_t *req, uid_t uid,
 		return SLURM_SUCCESS;
 	}
 	if (req->range_last < req->range_first) {
-		error("step_partial_comp: StepID=%u.%u range=%u-%u",
-		      req->job_id, req->job_step_id, req->range_first,
-		      req->range_last);
+		error("%s: %pS range=%u-%u",
+		      __func__, step_ptr, req->range_first, req->range_last);
 		return EINVAL;
 	}
 
@@ -3580,22 +3475,10 @@ extern int step_partial_comp(step_complete_msg_t *req, uid_t uid,
 	if (!step_ptr->exit_node_bitmap) {
 		/* initialize the node bitmap for exited nodes */
 		nodes = bit_set_count(step_ptr->step_node_bitmap);
-#if defined HAVE_ALPS_CRAY
-		/* For BGQ we only have 1 real task, so if it exits,
-		   the whole step is ending as well.
-		*/
-		req->range_last = nodes - 1;
-#endif
 		step_ptr->exit_node_bitmap = bit_alloc(nodes);
 		step_ptr->exit_code = req->step_rc;
 	} else {
 		nodes = bit_size(step_ptr->exit_node_bitmap);
-#if defined HAVE_ALPS_CRAY
-		/* For BGQ we only have 1 real task, so if it exits,
-		   the whole step is ending as well.
-		*/
-		req->range_last = nodes - 1;
-#endif
 		if ((req->step_rc == SIG_OOM) ||
 		    (req->step_rc > step_ptr->exit_code))
 			step_ptr->exit_code = req->step_rc;
@@ -3603,9 +3486,9 @@ extern int step_partial_comp(step_complete_msg_t *req, uid_t uid,
 	if ((req->range_first >= nodes) || (req->range_last >= nodes) ||
 	    (req->range_first > req->range_last)) {
 		/* range is zero origin */
-		error("step_partial_comp: StepID=%u.%u range=%u-%u nodes=%d",
-		      req->job_id, req->job_step_id, req->range_first,
-		      req->range_last, nodes);
+		error("%s: %pS range=%u-%u nodes=%d",
+		      __func__, step_ptr, req->range_first, req->range_last,
+		      nodes);
 		return EINVAL;
 	}
 
@@ -3617,10 +3500,8 @@ extern int step_partial_comp(step_complete_msg_t *req, uid_t uid,
 	if (rem_nodes == 0) {
 		/* release all switch windows */
 		if (step_ptr->switch_job) {
-			debug2("full switch release for step %u.%u, "
-			       "nodes %s", req->job_id,
-			       req->job_step_id,
-			       step_ptr->step_layout->node_list);
+			debug2("full switch release for %pS, nodes %s",
+			       step_ptr, step_ptr->step_layout->node_list);
 			switch_g_job_step_complete(
 				step_ptr->switch_job,
 				step_ptr->step_layout->node_list);
@@ -3636,9 +3517,8 @@ extern int step_partial_comp(step_complete_msg_t *req, uid_t uid,
 		hl = _step_range_to_hostlist(step_ptr,
 			req->range_first, req->range_last);
 		node_list = hostlist_ranged_string_xmalloc(hl);
-		debug2("partitial switch release for step %u.%u, "
-			"nodes %s", req->job_id,
-			req->job_step_id, node_list);
+		debug2("partitial switch release for %pS, nodes %s",
+			step_ptr, node_list);
 		switch_g_job_step_part_comp(
 			step_ptr->switch_job, node_list);
 		hostlist_destroy(hl);
@@ -3805,9 +3685,8 @@ extern int step_epilog_complete(struct job_record  *job_ptr,
 				step_offset);
 		}
 		rc++;
-		debug2("partitial switch release for step %u.%u, "
-			"epilog on %s", job_ptr->job_id,
-			step_ptr->step_id, node_name);
+		debug2("partitial switch release for %pS, epilog on %s",
+			step_ptr, node_name);
 		switch_g_job_step_part_comp(
 			step_ptr->switch_job, node_name);
 	}
@@ -3967,6 +3846,7 @@ extern int dump_job_step_state(void *x, void *arg)
  * IN/OUT - job_ptr - point to a job for which the step is to be loaded.
  * IN/OUT buffer - location to get data from, pointers advanced
  */
+/* NOTE: assoc_mgr tres and assoc read lock must be locked before calling */
 extern int load_step_state(struct job_record *job_ptr, Buf buffer,
 			   uint16_t protocol_version)
 {
@@ -4134,13 +4014,13 @@ extern int load_step_state(struct job_record *job_ptr, Buf buffer,
 
 	/* validity test as possible */
 	if (cyclic_alloc > 1) {
-		error("Invalid data for job %u.%u: cyclic_alloc=%u",
-		      job_ptr->job_id, step_id, cyclic_alloc);
+		error("Invalid data for %pJ StepId=%u: cyclic_alloc=%u",
+		      job_ptr, step_id, cyclic_alloc);
 		goto unpack_error;
 	}
 	if (no_kill > 1) {
-		error("Invalid data for job %u.%u: no_kill=%u",
-		      job_ptr->job_id, step_id, no_kill);
+		error("Invalid data for %pJ StepId=%u: no_kill=%u",
+		      job_ptr, step_id, no_kill);
 		goto unpack_error;
 	}
 
@@ -4249,7 +4129,7 @@ extern int load_step_state(struct job_record *job_ptr, Buf buffer,
 		switch_g_job_step_allocated(switch_tmp,
 					    step_ptr->step_layout->node_list);
 
-	info("recovered job step %u.%u", job_ptr->job_id, step_id);
+	info("recovered %pS", step_ptr);
 	return SLURM_SUCCESS;
 
 unpack_error:
@@ -4409,6 +4289,7 @@ static void _signal_step_timelimit(struct job_record *job_ptr,
 	agent_args->hostlist = hostlist_create(NULL);
 	kill_step = xmalloc(sizeof(kill_job_msg_t));
 	kill_step->job_id    = job_ptr->job_id;
+	kill_step->pack_jobid = job_ptr->pack_job_id;
 	kill_step->step_id   = step_ptr->step_id;
 	kill_step->job_state = job_ptr->job_state;
 	kill_step->job_uid   = job_ptr->user_id;
@@ -4479,10 +4360,8 @@ check_job_step_time_limit (struct job_record *job_ptr, time_t now)
 				step_ptr->tot_sus_time) / 60);
 		if (job_run_mins >= step_ptr->time_limit) {
 			/* this step has timed out */
-			info("check_job_step_time_limit: job %u step %u "
-				"has timed out (%u)",
-				job_ptr->job_id, step_ptr->step_id,
-				step_ptr->time_limit);
+			info("%s: %pS has timed out (%u)",
+			     __func__, step_ptr, step_ptr->time_limit);
 			_signal_step_timelimit(job_ptr, step_ptr, now);
 		}
 	}
@@ -4519,7 +4398,7 @@ extern int update_step(step_update_request_msg_t *req, uid_t uid)
 
 	job_ptr = find_job_record(req->job_id);
 	if (job_ptr == NULL) {
-		error("update_step: invalid job id %u", req->job_id);
+		error("%s: invalid JobId=%u", __func__, req->job_id);
 		return ESLURM_INVALID_JOB_ID;
 	}
 	if (req->jobacct) {
@@ -4583,8 +4462,8 @@ extern int update_step(step_update_request_msg_t *req, uid_t uid)
 				continue;
 			step2_ptr->time_limit = req->time_limit;
 			mod_cnt++;
-			info("Updating step %u.%u time limit to %u",
-			     req->job_id, step2_ptr->step_id, req->time_limit);
+			info("Updating %pS time limit to %u",
+			     step2_ptr, req->time_limit);
 		}
 		list_iterator_destroy (step_iterator);
 	} else {
@@ -4616,13 +4495,12 @@ extern int update_step(step_update_request_msg_t *req, uid_t uid)
 			jobacct_storage_g_step_complete(acct_db_conn, step_ptr);
 
 			mod_cnt++;
-			info("Updating step %u.%u jobacct info",
-			     req->job_id, req->step_id);
+			info("Updating %pS jobacct info", step_ptr);
 		} else {
 			step_ptr->time_limit = req->time_limit;
 			mod_cnt++;
-			info("Updating step %u.%u time limit to %u",
-			     req->job_id, req->step_id, req->time_limit);
+			info("Updating %pS time limit to %u",
+			     step_ptr, req->time_limit);
 		}
 	}
 	if (mod_cnt)
@@ -4741,8 +4619,7 @@ extern int post_job_step(struct step_record *step_ptr)
 
 	error_code = delete_step_record(job_ptr, step_ptr->step_id);
 	if (error_code == ENOENT) {
-		info("remove_job_step step %u.%u not found", job_ptr->job_id,
-		     step_ptr->step_id);
+		info("remove_job_step %pS not found", step_ptr);
 		return ESLURM_ALREADY_DONE;
 	}
 	_wake_pending_steps(job_ptr);

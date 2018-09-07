@@ -993,7 +993,7 @@ static void _build_hypercube_switch_table(int num_curves)
 		hypercube_switch_table[i].switch_index =
 			switch_data_table[i].index;
 		hypercube_switch_table[i].switch_name = xmalloc(
-			sizeof(char) * (strlen(switch_data_table[i].name) + 1));
+			strlen(switch_data_table[i].name) + 1);
 			
 		strcpy(hypercube_switch_table[i].switch_name, 
 			switch_data_table[i].name);
@@ -1267,27 +1267,28 @@ static void _print_switch_data_table(void)
 /* prints name and coordinates of all switches in hypercube switch table*/
 static void _print_hypercube_switch_table( int num_curves )
 {
-	char distances[512], nodes[512];
 	int i, j;
 
 	debug("Hypercube table has %d switch records in it",
 	      hypercube_switch_cnt);
 	for (i = 0; i < hypercube_switch_cnt; i++ ) {
-		strcpy(distances, "Distances: ");
+		char *distances = xstrdup("Distances: ");
+		char *nodes = xstrdup("Node Index: ");
 		for ( j = 0; j < num_curves; j++ ){
 			if (hypercube_switch_table[i].distance[j]) {
-				sprintf(distances, "%s%d, ", distances, 
-					hypercube_switch_table[i].distance[j]);
+				xstrfmtcat(distances, "%d, ",
+					   hypercube_switch_table[i].distance[j]);
 			} else
 				break;
 		}
-		strcpy(nodes, "Node Index: ");
 		for ( j = 0; j < hypercube_switch_table[i].node_cnt; j++ ) {
-			sprintf(nodes, "%s%d, ", nodes,
-				hypercube_switch_table[i].node_index[j]);
+			xstrfmtcat(nodes, "%d, ",
+				   hypercube_switch_table[i].node_index[j]);
 		}
-		debug("    %s: %d - %s %s", switch_data_table[i].name,
-		      i, distances,nodes);
+		debug("    %s: %d - %s %s",
+		      switch_data_table[i].name, i, distances,nodes);
+		xfree(distances);
+		xfree(nodes);
 	}
 }
 
@@ -1296,18 +1297,18 @@ static void _print_hypercube_switch_table( int num_curves )
 static void _print_sorted_hilbert_curves( int num_curves )
 {
 	int i, j;
-	char s[256];
 
 	debug("Hilbert Curves Ranking Created for %d Hilbert Curves",
 	      num_curves);
 	for ( i = 0 ; i < hypercube_switch_cnt ; i++ ) {
-		strcpy(s, "-- ");
+		char *s = xstrdup("-- ");
 		for ( j = 0 ; j < num_curves ; j++ ) {
-			sprintf(s,"%s%7s -%4d,  ", s,
-				hypercube_switches[j][i]->switch_name,
-				hypercube_switches[j][i]->switch_index);
+			xstrfmtcat(s, "%7s -%4d,  ",
+				   hypercube_switches[j][i]->switch_name,
+				   hypercube_switches[j][i]->switch_index);
 		}
 		debug("%s", s);
+		xfree(s);
 	}
 }
 
@@ -1315,14 +1316,14 @@ static void _print_sorted_hilbert_curves( int num_curves )
 /* returns a string of a switch's name coordinates and connections */
 static char *_print_switch_str(switch_data *switch_ptr, int print, char *offset)
 {
-//XXX overrun possibility
-	char *str = xmalloc(sizeof(char) * 1024);
+	char *str = NULL;
 	char *coordinates = _create_coordinate_str(switch_ptr);
 	char *connections = _create_connection_str(switch_ptr);
 	char *conn_nodes = _create_conn_node_str(switch_ptr);
 
-	sprintf(str, "%s%s -- coordinates: %s -- connections:%s -- nodes:%s",
-		offset, switch_ptr->name, coordinates, connections, conn_nodes);
+	xstrfmtcat(str, "%s%s -- coordinates: %s -- connections:%s -- nodes:%s",
+		   offset, switch_ptr->name, coordinates, connections,
+		   conn_nodes);
 	xfree(coordinates);
 	xfree(connections);
 	xfree(conn_nodes);
@@ -1340,13 +1341,9 @@ static char *_print_switch_str(switch_data *switch_ptr, int print, char *offset)
 static char *_create_coordinate_str(switch_data *switch_ptr)
 {
 	int i;
-	char *str = xmalloc( sizeof(char) * 1024);
-
-	strcpy(str,"(");
+	char *str = xstrdup("(");
 	for (i = 0; i < hypercube_dimensions; i++) {
-		char buf[5];
-		sprintf(buf, "%d,",switch_ptr->coordinates[i]);
-		strcat(str, buf);
+		xstrfmtcat(str, "%d,", switch_ptr->coordinates[i]);
 	}
 	str[strlen(str)-1] = ')';
 	return str;
@@ -1357,17 +1354,13 @@ static char *_create_coordinate_str(switch_data *switch_ptr)
 static char *_create_connection_str(switch_data *switch_ptr)
 {
 	int i;
-	char *str = xmalloc(sizeof(char) * 1024);
-
-	strcpy(str,"");
+	char *str = NULL;
 	for (i = 0; i < switch_ptr->sw_conn_cnt; i++) {
-		char buf[64];
-		sprintf(buf, "%s-%d,", switch_ptr->sw_conns[i]->name,
-			switch_ptr->sw_conn_speed[i] );
-		strcat(str, buf);
+		xstrfmtcat(str, "%s-%d,", switch_ptr->sw_conns[i]->name,
+			   switch_ptr->sw_conn_speed[i]);
 	}
-
-	str[strlen(str)-1] = '\0';
+	if (str)
+		str[strlen(str)-1] = '\0';
 	return str;
 }
 
@@ -1376,15 +1369,12 @@ static char *_create_connection_str(switch_data *switch_ptr)
 static char *_create_conn_node_str(switch_data *switch_ptr)
 {
 	int i;
-	char *str = xmalloc( sizeof(char) * 1024);
-
-	strcpy(str,"");
+	char *str = NULL;
 	for (i = 0; i < switch_ptr->node_conn_cnt; i++) {
-		char buf[64];
-		sprintf(buf, "%s,",switch_ptr->node_conns[i]->name);
-		strcat(str, buf);
+		xstrfmtcat(str, "%s,", switch_ptr->node_conns[i]->name);
 	}
-	str[strlen(str)-1] = '\0';
+	if (str)
+		str[strlen(str)-1] = '\0';
 	return str;
 }
 

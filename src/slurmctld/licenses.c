@@ -61,7 +61,7 @@ static pthread_mutex_t license_mutex = PTHREAD_MUTEX_INITIALIZER;
 static void _pack_license(struct licenses *lic, Buf buffer, uint16_t protocol_version);
 
 /* Print all licenses on a list */
-static inline void _licenses_print(char *header, List licenses, int job_id)
+static void _licenses_print(char *header, List licenses, struct job_record *job_ptr)
 {
 	ListIterator iter;
 	licenses_t *license_entry;
@@ -73,13 +73,13 @@ static inline void _licenses_print(char *header, List licenses, int job_id)
 
 	iter = list_iterator_create(licenses);
   	while ((license_entry = (licenses_t *) list_next(iter))) {
-		if (job_id == 0) {
+		if (!job_ptr) {
 			info("licenses: %s=%s total=%u used=%u",
 			     header, license_entry->name,
 			     license_entry->total, license_entry->used);
 		} else {
-			info("licenses: %s=%s job_id=%u available=%u used=%u",
-			     header, license_entry->name, job_id,
+			info("licenses: %s=%s %pJ available=%u used=%u",
+			     header, license_entry->name, job_ptr,
 			     license_entry->total, license_entry->used);
 		}
 	}
@@ -142,7 +142,11 @@ static List _build_license_list(char *licenses, bool *valid)
 				*valid = false;
 				break;
 			}
-			/* ':' is used as a separator in version 2.5 or later
+			/*
+			 * The '*' was still in use internally until 18.08, so
+			 * the check for '*' must stay until 20.02 at least.
+			 *
+			 * ':' is used as a separator in version 2.5 or later
 			 * '*' is used as a separator in version 2.4 or earlier
 			 */
 			if ((token[i] == ':') || (token[i] == '*')) {
@@ -180,10 +184,10 @@ static List _build_license_list(char *licenses, bool *valid)
 
 /* Given a list of license_t records, return a license string.
  * This can be combined with _build_license_list() to eliminate duplicates
- * (e.g. "tux*2,tux*3" gets changed to "tux*5"). */
+ * (e.g. "tux:2,tux:3" gets changed to "tux:5"). */
 static char * _build_license_string(List license_list)
 {
-	char buf[128], *sep;
+	char *sep = "";
 	char *licenses = NULL;
 	ListIterator iter;
 	licenses_t *license_entry;
@@ -193,13 +197,9 @@ static char * _build_license_string(List license_list)
 
 	iter = list_iterator_create(license_list);
 	while ((license_entry = (licenses_t *) list_next(iter))) {
-		if (licenses)
-			sep = ",";
-		else
-			sep = "";
-		snprintf(buf, sizeof(buf), "%s%s*%u", sep, license_entry->name,
-			 license_entry->total);
-		xstrcat(licenses, buf);
+		xstrfmtcat(licenses, "%s%s:%u",
+			   sep, license_entry->name, license_entry->total);
+		sep = ",";
 	}
 	list_iterator_destroy(iter);
 
@@ -260,7 +260,7 @@ extern int license_init(char *licenses)
 	if (!valid)
 		fatal("Invalid configured licenses: %s", licenses);
 
-	_licenses_print("init_license", license_list, 0);
+	_licenses_print("init_license", license_list, NULL);
 	slurm_mutex_unlock(&license_mutex);
 	return SLURM_SUCCESS;
 }
@@ -317,7 +317,7 @@ extern int license_update(char *licenses)
 
         FREE_NULL_LIST(license_list);
         license_list = new_list;
-        _licenses_print("update_license", license_list, 0);
+        _licenses_print("update_license", license_list, NULL);
         slurm_mutex_unlock(&license_mutex);
         return SLURM_SUCCESS;
 }
@@ -543,7 +543,7 @@ extern List license_validate(char *licenses,
 	}
 
 	slurm_mutex_lock(&license_mutex);
-	_licenses_print("request_license", job_license_list, 0);
+	_licenses_print("request_license", job_license_list, NULL);
 	iter = list_iterator_create(job_license_list);
 	while ((license_entry = (licenses_t *) list_next(iter))) {
 		if (license_list) {
@@ -709,7 +709,7 @@ extern int license_job_get(struct job_record *job_ptr)
 		}
 	}
 	list_iterator_destroy(iter);
-	_licenses_print("acquire_license", license_list, job_ptr->job_id);
+	_licenses_print("acquire_license", license_list, job_ptr);
 	slurm_mutex_unlock(&license_mutex);
 	return rc;
 }
@@ -752,7 +752,7 @@ extern int license_job_return(struct job_record *job_ptr)
 		}
 	}
 	list_iterator_destroy(iter);
-	_licenses_print("return_license", license_list, job_ptr->job_id);
+	_licenses_print("return_license", license_list, job_ptr);
 	slurm_mutex_unlock(&license_mutex);
 	return rc;
 }

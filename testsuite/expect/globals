@@ -98,7 +98,6 @@ cset sh5util     "${slurm_dir}/bin/sh5util"
 cset sinfo       "${slurm_dir}/bin/sinfo"
 cset smap        "${slurm_dir}/bin/smap"
 cset smd         "${slurm_dir}/bin/smd"
-cset slurmctld   "${slurm_dir}/sbin/slurmctld"
 cset sprio       "${slurm_dir}/bin/sprio"
 cset squeue      "${slurm_dir}/bin/squeue"
 cset srun        "${slurm_dir}/bin/srun"
@@ -1316,7 +1315,16 @@ proc test_cpu_affinity_or_cgroup { } {
 	if { [lsearch $parts "affinity"] != -1 } {
 		set affinity 1
 	} elseif { [lsearch $parts "cgroup"] != -1 } {
-		set affinity 1
+		spawn $scontrol show config
+		expect {
+			-re "TaskAffinity *= yes" {
+				set affinity 1
+				exp_continue
+			}
+			eof {
+				wait
+			}
+		}
 	}
 
 	log_user 1
@@ -3528,6 +3536,63 @@ proc get_partition_nodes {partition states} {
 
 #####################################################################
 #
+# Proc: set_partition_maximum_time_limit
+#
+# Purpose: Set the maximum time limit in a given partition
+#
+# Input:   partition - partition to set the max time limit of
+#          limit - the new time limit
+#
+# Returns: 0 if succeeded, -1 if error
+#
+#####################################################################
+
+proc set_partition_maximum_time_limit {partition limit} {
+	global scontrol exit_code
+
+	if {[string length $partition] == 0} {
+		set partition [default_partition]
+		if { $partition == "" } {
+			return 1
+		}
+	}
+
+	if { $limit < -1 } {
+		log_error "Trying to set invalid partition time limit of $limit"
+		return 1
+	}
+	if { $limit == -1 } {
+		set expected_lim "UNLIMITED"
+	} else {
+		set expected_lim limit
+	}
+
+	spawn $scontrol update partitionname=$partition MaxTime=-1
+	expect {
+		timeout {
+			log_error "scontrol not responding"
+			return 1
+		}
+		eof {
+			wait
+		}
+	}
+
+	set maxtime [get_partition_maximum_time_limit $partition]
+	if { $maxtime != $limit } {
+		log_error "Unable to update partition MaxTime, got $maxtime, wanted $limit"
+		return 1
+	}
+	if { $exit_code != 0 } {
+		log_error "set_partition_maximum_time_limit: Unexpected error."
+		return 1
+	}
+
+	return 0
+}
+
+#####################################################################
+#
 # Proc: get_partition_maximum_time_limit
 #
 # Purpose: Get the maximum time limit in a given partition
@@ -4047,8 +4112,13 @@ proc test_pack_step { } {
 #
 ################################################################
 proc reconfigure { {cluster ""} } {
-	global exit_code scontrol
+	global exit_code scontrol timeout
 
+	#
+	# Increase timeout just in case we're running under valgrind
+	#
+	set save_timeout $timeout
+	set timeout 20
 	if { $cluster == "" } {
 		spawn $scontrol reconfigure
 	} else {
@@ -4074,9 +4144,10 @@ proc reconfigure { {cluster ""} } {
 		}
 	}
 	#
-	# Wait for reconfigure to complete, then return.
+	# Wait for reconfigure to complete, then reset timeout and return.
 	#
 	sleep 5
+	set timeout $save_timeout
 }
 
 proc log_error {msg} {
@@ -4145,12 +4216,12 @@ proc check_job_state { job state } {
 
 ################################################################
 #
-# Proc: get_gpu_count
+# Proc: get_craynetwork_count
 #
-# Returns number of GPUs in the default partition
+# Returns number of craynetwork GRES in the default partition
 #
 ################################################################
-proc get_gpu_count {} {
+proc get_craynetwork_count {} {
 	global number sbatch scancel
 	set count 0
 	set fini 0
@@ -4161,7 +4232,7 @@ proc get_gpu_count {} {
 			set count -1
 			break
 		}
-		spawn $sbatch --gres=gpu:$inx --output=/dev/null --wrap "exit 0"
+		spawn $sbatch --gres=craynetwork:$inx --output=/dev/null --wrap "exit 0"
 		expect {
 			-re "Invalid generic resource" {
 				set fini 1
@@ -4190,4 +4261,131 @@ proc get_gpu_count {} {
 	}
 	log_user 1
 	return $count
+}
+
+################################################################
+#
+# Proc: get_gpu_count
+#
+# For a given node count, returns number of GPUs per node on
+# those "node_count" nodes with the highest GPU counts
+# For example: node1 has 1 GPU, node2 has 2 GPUs and node3 has 3 GPUs
+# [get_gpu_count 1] returns 3 (i.e. 1 node 3 GPUs)
+# [get_gpu_count 2] returns 2 (i.e. 2 nodes have at least 2 GPUs each)
+# [get_gpu_count 3] returns 1 (i.e. 3 nodes have at least 1 GPU each)
+#
+################################################################
+proc get_gpu_count { node_count } {
+	global number sinfo
+	set fini 0
+	set node_inx 0
+	set def_part [default_partition]
+	set alpha_numeric_colon_paren "\[a-zA-Z0-9_\\(\\),\:\-\]+"
+
+	if {$node_count <= 0} {
+		return 0
+	}
+
+	log_user 0
+	spawn $sinfo -N -p$def_part -oGRES=%G -h
+	expect {
+		-re "GRES=($alpha_numeric_colon_paren)" {
+			set count 0
+			set parts [split $expect_out(1,string) ",/"]
+			while 1 {
+				set gpu_found [lsearch $parts "gpu*"]
+				if { $gpu_found == -1 } break
+
+				set parts2 [split [lindex $parts $gpu_found] ":(/"]
+
+				set col [lsearch -regexp $parts2 ^$number$]
+				if { $col == -1 } {
+					incr count
+				} else {
+					set count [expr $count + [lindex $parts2 $col]]
+				}
+				incr node_inx
+				lappend gpu_count $count
+				set parts [lreplace $parts $gpu_found $gpu_found]
+			}
+			exp_continue
+		}
+		eof {
+			wait
+		}
+	}
+	log_user 1
+
+	if {$node_inx < $node_count} {
+		return 0
+	}
+	set count [lindex [lsort -decreasing -integer $gpu_count] [expr $node_count - 1]]
+	return $count
+}
+
+################################################################
+#
+# Proc: get_over_time_limit
+#
+# Returns the value of OverTimeLimit in slurm.conf
+#
+################################################################
+proc get_over_time_limit {} {
+	global number scontrol exit_code
+	set ret 0
+	log_user 0
+	spawn $scontrol show config
+	expect {
+		-re "OverTimeLimit *= *($number) min" {
+			set ret $expect_out(1,string)
+		}
+		timeout {
+			log_error "FAILURE: scontrol not responding"
+			incr exit_code
+		}
+		eof {
+			wait
+		}
+	}
+	log_user 1
+	return $ret
+}
+
+################################################################
+#
+# Proc: cuda_count
+#
+# Purpose: Determine count of allocated GPUs
+#
+# Returns: Return the number of GPUs or -1 on error
+#
+# Input: cuda_string - Contents of a CUDA_VISIBLE_DEVICES environment
+# variable
+#
+################################################################
+proc cuda_count { cuda_string } {
+	set cuda_count 0
+	set has_number 0
+	set len [string length $cuda_string]
+	for {set char_inx 0} {$char_inx < $len} {incr char_inx} {
+		set cuda_char [string index $cuda_string $char_inx]
+		if {[string match , $cuda_char]} {
+			if {$has_number > 0} {
+				incr cuda_count
+				set has_number 0
+			} else {
+				send_user "cuda_count: Invalid input ($cuda_string)\n"
+				return -1
+			}
+		} elseif {[string is digit $cuda_char]} {
+			set has_number 1
+		}
+	}
+	if {$has_number > 0} {
+		incr cuda_count
+	} else {
+		send_user "cuda_count: Invalid input ($cuda_string)\n"
+		return -1
+	}
+	return $cuda_count
 }

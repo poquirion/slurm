@@ -247,7 +247,6 @@ fi
 
 AM_CONDITIONAL(BUILD_SVIEW, [test "x$ac_glib_test" = "xyes"] && [test "x$ac_gtk_test" = "xyes"])
 
-dnl Cray ALPS/Basil support depends on mySQL
 X_AC_CRAY
 
 dnl checks for system services.
@@ -414,6 +413,7 @@ AC_CONFIG_FILES([Makefile
 		 contribs/sgather/Makefile
 		 contribs/sgi/Makefile
 		 contribs/sjobexit/Makefile
+		 contribs/pmi/Makefile
 		 contribs/pmi2/Makefile
 		 doc/Makefile
 		 doc/man/Makefile
@@ -538,7 +538,6 @@ AC_CONFIG_FILES([Makefile
 		 src/plugins/job_submit/require_timelimit/Makefile
 		 src/plugins/job_submit/throttle/Makefile
 		 src/plugins/launch/Makefile
-		 src/plugins/launch/aprun/Makefile
 		 src/plugins/launch/poe/Makefile
 		 src/plugins/launch/slurm/Makefile
 		 src/plugins/mcs/Makefile
@@ -554,7 +553,6 @@ AC_CONFIG_FILES([Makefile
 		 src/plugins/power/cray/Makefile
 		 src/plugins/power/none/Makefile
 		 src/plugins/preempt/Makefile
-		 src/plugins/preempt/job_prio/Makefile
 		 src/plugins/preempt/none/Makefile
 		 src/plugins/preempt/partition_prio/Makefile
 		 src/plugins/preempt/qos/Makefile
@@ -576,9 +574,6 @@ AC_CONFIG_FILES([Makefile
 		 src/plugins/sched/builtin/Makefile
 		 src/plugins/sched/hold/Makefile
 		 src/plugins/select/Makefile
-		 src/plugins/select/alps/Makefile
-		 src/plugins/select/alps/libalps/Makefile
-		 src/plugins/select/alps/libemulate/Makefile
 		 src/plugins/select/cons_res/Makefile
 		 src/plugins/select/cons_tres/Makefile
 		 src/plugins/select/cray/Makefile

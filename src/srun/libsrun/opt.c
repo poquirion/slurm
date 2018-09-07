@@ -210,11 +210,11 @@
 #define LONG_OPT_GPUS_PER_SOCKET 0x177
 #define LONG_OPT_GPUS_PER_TASK   0x178
 #define LONG_OPT_MEM_PER_GPU     0x179
+#define LONG_OPT_TRES_PER_JOB    0x17a
 
 extern char **environ;
 
 /*---- global variables, defined in opt.h ----*/
-resource_allocation_response_msg_t *global_resp = NULL;
 int	error_exit = 1;
 int	immediate_exit = 1;
 char *	mpi_type = NULL;
@@ -355,6 +355,7 @@ struct option long_options[] = {
 	{"thread-spec",      required_argument, 0, LONG_OPT_THREAD_SPEC},
 	{"time-min",         required_argument, 0, LONG_OPT_TIME_MIN},
 	{"threads-per-core", required_argument, 0, LONG_OPT_THREADSPERCORE},
+	{"tres-per-job",     required_argument, 0, LONG_OPT_TRES_PER_JOB},
 	{"tmp",              required_argument, 0, LONG_OPT_TMP},
 	{"uid",              required_argument, 0, LONG_OPT_UID},
 	{"use-min-nodes",    no_argument,       0, LONG_OPT_USE_MIN_NODES},
@@ -366,7 +367,7 @@ struct option long_options[] = {
 	{NULL,               0,                 0, 0}
 	};
 char *opt_string = "+A:B:c:C:d:D:e:EG:hHi:I::jJ:kK::lL:m:M:n:N:"
-		   "o:Op:P:qQr:sS:t:T:uU:vVw:W:x:XZ";
+		   "o:Op:P:q:Qr:sS:t:T:uU:vVw:W:x:XZ";
 
 
 static slurm_opt_t *_get_first_opt(int pack_offset);
@@ -528,15 +529,86 @@ extern int get_max_pack_group(void)
 	return max_pack_offset;
 }
 
+/*
+ * Copy the last option record:
+ * Copy strings if the original values will be preserved and
+ *   reused for additional heterogeneous job/steps
+ * Otherwise clear/NULL the pointer so it does not get re-used
+ *   and freed, which will render the copied pointer bad
+ */
 static slurm_opt_t *_opt_copy(void)
 {
 	slurm_opt_t *opt_dup;
+	int i;
 
 	opt_dup = xmalloc(sizeof(slurm_opt_t));
 	memcpy(opt_dup, &opt, sizeof(slurm_opt_t));
 	opt_dup->srun_opt = xmalloc(sizeof(srun_opt_t));
 	memcpy(opt_dup->srun_opt, &sropt, sizeof(srun_opt_t));
+
+	opt_dup->account = xstrdup(opt.account);
+	opt_dup->acctg_freq = xstrdup(opt.acctg_freq);
+	sropt.alloc_nodelist = NULL;	/* Moved by memcpy */
+	opt_dup->srun_opt->argv = xmalloc(sizeof(char *) * sropt.argc);
+	for (i = 0; i < sropt.argc; i++)
+		opt_dup->srun_opt->argv[i] = xstrdup(sropt.argv[i]);
+	sropt.bcast_file = NULL;	/* Moved by memcpy */
+	opt.burst_buffer = NULL;	/* Moved by memcpy */
+	opt_dup->c_constraints = xstrdup(opt.c_constraints);
+	opt_dup->srun_opt->ckpt_dir = xstrdup(sropt.ckpt_dir);
+	opt_dup->srun_opt->ckpt_interval_str =
+		xstrdup(sropt.ckpt_interval_str);
+	opt_dup->clusters = xstrdup(opt.clusters);
 	opt_dup->srun_opt->cmd_name = xstrdup(sropt.cmd_name);
+	opt_dup->comment = xstrdup(opt.comment);
+	opt.constraints = NULL;		/* Moved by memcpy */
+	opt_dup->srun_opt->cpu_bind = xstrdup(sropt.cpu_bind);
+	opt_dup->cwd = xstrdup(opt.cwd);
+	opt_dup->dependency = xstrdup(opt.dependency);
+	opt_dup->srun_opt->efname = xstrdup(sropt.efname);
+	opt_dup->srun_opt->epilog = xstrdup(sropt.epilog);
+	opt_dup->exc_nodes = xstrdup(opt.exc_nodes);
+	opt_dup->srun_opt->export_env = xstrdup(sropt.export_env);
+	opt_dup->extra = xstrdup(opt.extra);
+	opt.gres = NULL;		/* Moved by memcpy */
+	opt_dup->gpus = xstrdup(opt.gpus);
+	opt_dup->gpu_bind = xstrdup(opt.gpu_bind);
+	opt_dup->gpu_freq = xstrdup(opt.gpu_freq);
+	opt_dup->gpus_per_node = xstrdup(opt.gpus_per_node);
+	opt_dup->gpus_per_socket = xstrdup(opt.gpus_per_socket);
+	opt_dup->gpus_per_node = xstrdup(opt.gpus_per_node);
+	opt.hint_env = NULL;		/* Moved by memcpy */
+	sropt.hostfile = NULL;		/* Moved by memcpy */
+	opt_dup->srun_opt->ifname = xstrdup(sropt.ifname);
+	opt_dup->job_name = xstrdup(opt.job_name);
+	opt_dup->srun_opt->ofname = xstrdup(sropt.ofname);
+	opt_dup->srun_opt->launcher_opts = xstrdup(sropt.launcher_opts);
+	sropt.launcher_opts = NULL;	/* Moved by memcpy */
+	opt.licenses = NULL;		/* Moved by memcpy */
+	opt.mail_user = NULL;		/* Moved by memcpy */
+	opt_dup->mcs_label = xstrdup(opt.mcs_label);
+	opt.mem_bind = NULL;		/* Moved by memcpy */
+	opt_dup->mpi_type = xstrdup(opt.mpi_type);
+	opt.network = NULL;		/* Moved by memcpy */
+	opt.nodelist = NULL;		/* Moved by memcpy */
+	sropt.pack_group = NULL;	/* Moved by memcpy */
+	sropt.pack_grp_bits = NULL;	/* Moved by memcpy */
+	opt.partition = NULL;		/* Moved by memcpy */
+	/* NOTE: Do NOT copy "progname", shared by all job components */
+	opt_dup->srun_opt->prolog = xstrdup(sropt.prolog);
+	opt_dup->srun_opt->propagate = xstrdup(sropt.propagate);
+	opt_dup->qos = xstrdup(opt.qos);
+	opt_dup->reservation = xstrdup(opt.reservation);
+	sropt.restart_dir = NULL;	/* Moved by memcpy */
+	opt.spank_job_env = NULL;	/* Moved by memcpy */
+	opt_dup->srun_opt->task_epilog = xstrdup(sropt.task_epilog);
+	opt_dup->srun_opt->task_prolog = xstrdup(sropt.task_prolog);
+	opt_dup->time_limit_str = xstrdup(opt.time_limit_str);
+	opt_dup->time_min_str = xstrdup(opt.time_min_str);
+	opt_dup->tres_bind = xstrdup(opt.tres_bind);
+	opt_dup->tres_freq = xstrdup(opt.tres_freq);
+	opt_dup->user = xstrdup(opt.user);
+	opt_dup->wckey = xstrdup(opt.wckey);
 
 	return opt_dup;
 }
@@ -623,57 +695,7 @@ extern int initialize_and_process_args(int argc, char **argv, int *argc_off)
 	bit_free(pack_grp_bits);
 
 	if (opt_list && pending_append) {		/* Last record */
-		/*
-		 * Copy the last option record:
-		 * Copy strings if the original values will be preserved and
-		 *   reused for additional heterogeneous job/steps
-		 * Otherwise clear/NULL the pointer so it does not get re-used
-		 *   and freed, which will render the copied pointer bad
-		 */
-		slurm_opt_t *opt_dup;
-		opt_dup = xmalloc(sizeof(slurm_opt_t));
-		memcpy(opt_dup, &opt, sizeof(slurm_opt_t));
-		opt_dup->srun_opt = xmalloc(sizeof(srun_opt_t));
-		memcpy(opt_dup->srun_opt, &sropt, sizeof(srun_opt_t));
-		sropt.alloc_nodelist = NULL;	/* Moved by memcpy */
-		opt_dup->srun_opt->argv = xmalloc(sizeof(char *) * sropt.argc);
-		for (i = 0; i < sropt.argc; i++)
-			opt_dup->srun_opt->argv[i] = xstrdup(sropt.argv[i]);
-		sropt.bcast_file = NULL;	/* Moved by memcpy */
-		opt.burst_buffer = NULL;	/* Moved by memcpy */
-		opt_dup->srun_opt->ckpt_dir = xstrdup(sropt.ckpt_dir);
-		opt_dup->srun_opt->ckpt_interval_str =
-			xstrdup(sropt.ckpt_interval_str);
-		opt_dup->srun_opt->cmd_name = xstrdup(sropt.cmd_name);
-		opt.constraints = NULL;		/* Moved by memcpy */
-		sropt.cpu_bind = NULL;		/* Moved by memcpy */
-		opt_dup->srun_opt->cpu_bind = xstrdup(sropt.cpu_bind);
-		opt_dup->srun_opt->efname = xstrdup(sropt.efname);
-		opt_dup->srun_opt->epilog = xstrdup(sropt.epilog);
-		opt_dup->srun_opt->export_env = xstrdup(sropt.export_env);
-		opt.gres = NULL;		/* Moved by memcpy */
-		opt.hint_env = NULL;		/* Moved by memcpy */
-		sropt.hostfile = NULL;		/* Moved by memcpy */
-		opt_dup->srun_opt->ifname = xstrdup(sropt.ifname);
-		opt_dup->srun_opt->ofname = xstrdup(sropt.ofname);
-		opt_dup->srun_opt->launcher_opts = xstrdup(sropt.launcher_opts);
-		sropt.launcher_opts = NULL;	/* Moved by memcpy */
-		opt.licenses = NULL;		/* Moved by memcpy */
-		opt.mail_user = NULL;		/* Moved by memcpy */
-		opt.mem_bind = NULL;		/* Moved by memcpy */
-		opt.network = NULL;		/* Moved by memcpy */
-		opt.nodelist = NULL;		/* Moved by memcpy */
-		sropt.pack_group = NULL;	/* Moved by memcpy */
-		sropt.pack_grp_bits = NULL;	/* Moved by memcpy */
-		opt.partition = NULL;		/* Moved by memcpy */
-		opt_dup->srun_opt->prolog = xstrdup(sropt.prolog);
-		opt_dup->srun_opt->propagate = xstrdup(sropt.propagate);
-		sropt.restart_dir = NULL;	/* Moved by memcpy */
-		opt.spank_job_env = NULL;	/* Moved by memcpy */
-		opt_dup->srun_opt->task_epilog = xstrdup(sropt.task_epilog);
-		opt_dup->srun_opt->task_prolog = xstrdup(sropt.task_prolog);
-
-		list_append(opt_list, opt_dup);
+		list_append(opt_list, _opt_copy());
 		pending_append = false;
 	}
 
@@ -863,6 +885,7 @@ static void _opt_default(void)
 		xfree(opt.time_limit_str);
 		opt.time_min		= NO_VAL;
 		xfree(opt.time_min_str);
+		xfree(opt.tres_per_job);
 		opt.uid			= uid;
 		sropt.unbuffered	= false;
 		opt.user		= uid_to_string(uid);
@@ -1257,7 +1280,9 @@ _process_env_var(env_vars_t *e, const char *val)
 			error("Invalid SLURM_OPEN_MODE: %s. Ignored", val);
 		break;
 	case OPT_GRES_FLAGS:
-		if (!xstrcasecmp(val, "enforce-binding")) {
+		if (!xstrcasecmp(val, "disable-binding")) {
+			opt.job_flags |= GRES_DISABLE_BIND;
+		} else if (!xstrcasecmp(val, "enforce-binding")) {
 			opt.job_flags |= GRES_ENFORCE_BIND;
 		} else {
 			error("Invalid SLURM_GRES_FLAGS specification: %s",
@@ -2269,6 +2294,14 @@ static void _set_options(const int argc, char **argv)
 			xfree(opt.time_min_str);
 			opt.time_min_str = xstrdup(optarg);
 			break;
+		case LONG_OPT_TRES_PER_JOB:
+			/*
+			 * Currently undocumented option.
+			 * For future use and testing cons_tres.
+			 */
+			xfree(opt.tres_per_job);
+			opt.tres_per_job = xstrdup(optarg);
+			break;
 		case LONG_OPT_GRES:
 			if (!optarg)
 				break;	/* Fix for Coverity false positive */
@@ -2283,7 +2316,9 @@ static void _set_options(const int argc, char **argv)
 		case LONG_OPT_GRES_FLAGS:
 			if (!optarg)
 				break;	/* Fix for Coverity false positive */
-			if (!xstrcasecmp(optarg, "enforce-binding")) {
+			if (!xstrcasecmp(optarg, "disable-binding")) {
+				opt.job_flags |= GRES_DISABLE_BIND;
+			} else if (!xstrcasecmp(optarg, "enforce-binding")) {
 				opt.job_flags |= GRES_ENFORCE_BIND;
 			} else {
 				error("Invalid gres-flags specification: %s",
@@ -3196,6 +3231,7 @@ static void _opt_list(void)
 	info("gpus-per-socket   : %s", opt.gpus_per_socket);
 	info("gpus-per-task     : %s", opt.gpus_per_task);
 	info("mem-per-gpu       : %"PRIi64, opt.mem_per_gpu);
+	info("tres-per-job      : %s", opt.gpus_per_task);
 
 	str = print_commandline(sropt.argc, sropt.argv);
 	info("remote command    : `%s'", str);
@@ -3372,8 +3408,8 @@ static void _help(void)
 #ifdef HAVE_PTY_H
 "      --pty                   run task zero in pseudo terminal\n"
 #endif
-"  -q, --quit-on-interrupt     quit on single Ctrl-C\n"
-"      --qos=qos               quality of service\n"
+"      --quit-on-interrupt     quit on single Ctrl-C\n"
+"  -q, --qos=qos               quality of service\n"
 "  -Q, --quiet                 quiet mode (suppress informational messages)\n"
 "      --reboot                reboot block before starting job\n"
 "  -r, --relative=n            run job step relative to node n of allocation\n"
@@ -3438,17 +3474,15 @@ static void _help(void)
 "      --ntasks-per-core=n     number of tasks to invoke on each core\n"
 "      --ntasks-per-socket=n   number of tasks to invoke on each socket\n");
 	conf = slurm_conf_lock();
-	if (conf->task_plugin != NULL
-	    && ((strstr(conf->task_plugin, "affinity"))
-		|| (strstr(conf->task_plugin, "cgroup")))) {
+	if (xstrstr(conf->task_plugin, "affinity") ||
+	    xstrstr(conf->task_plugin, "cgroup")) {
 		printf(
 "      --cpu-bind=             Bind tasks to CPUs\n"
 "                              (see \"--cpu-bind=help\" for options)\n"
 "      --hint=                 Bind tasks according to application hints\n"
 "                              (see \"--hint=help\" for options)\n");
 	}
-	if (conf->task_plugin != NULL
-	    && (strstr(conf->task_plugin, "affinity"))) {
+	if (xstrstr(conf->task_plugin, "affinity")) {
 		printf(
 "      --mem-bind=             Bind memory to locality domains (ldom)\n"
 "                              (see \"--mem-bind=help\" for options)\n");

@@ -52,7 +52,6 @@
 #include "src/common/env.h"
 #include "src/common/gres.h"
 #include "src/common/list.h"
-#include "src/common/xcgroup_read_config.c"
 #include "src/common/xstring.h"
 
 #include "../common/gres_common.h"
@@ -187,7 +186,8 @@ extern void job_set_env(char ***job_env_ptr, void *gres_ptr, int node_inx)
  * Set environment variables as appropriate for a job (i.e. all tasks) based
  * upon the job step's GRES state.
  */
-extern void step_set_env(char ***step_env_ptr, void *gres_ptr)
+extern void step_set_env(char ***step_env_ptr, void *gres_ptr, char *tres_freq,
+			 int local_proc_id)
 {
 	static int local_inx = 0;
 	static bool already_seen = false;
@@ -197,7 +197,7 @@ extern void step_set_env(char ***step_env_ptr, void *gres_ptr)
 }
 
 /*
- * Reset environment variables as appropriate for a job (i.e. this one tasks)
+ * Reset environment variables as appropriate for a job (i.e. this one task)
  * based upon the job step's GRES state and assigned CPUs.
  */
 extern void step_reset_env(char ***step_env_ptr, void *gres_ptr,

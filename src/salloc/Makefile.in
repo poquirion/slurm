@@ -92,7 +92,6 @@ build_triplet = @build@
 host_triplet = @host@
 target_triplet = @target@
 bin_PROGRAMS = salloc$(EXEEXT)
-@HAVE_ALPS_CRAY_TRUE@@HAVE_REAL_CRAY_TRUE@am__append_1 = -ljob
 subdir = src/salloc
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
 am__aclocal_m4_deps = $(top_srcdir)/auxdir/ax_check_compile_flag.m4 \
@@ -369,6 +368,8 @@ PMIX_V1_CPPFLAGS = @PMIX_V1_CPPFLAGS@
 PMIX_V1_LDFLAGS = @PMIX_V1_LDFLAGS@
 PMIX_V2_CPPFLAGS = @PMIX_V2_CPPFLAGS@
 PMIX_V2_LDFLAGS = @PMIX_V2_LDFLAGS@
+PMIX_V3_CPPFLAGS = @PMIX_V3_CPPFLAGS@
+PMIX_V3_LDFLAGS = @PMIX_V3_LDFLAGS@
 PROJECT = @PROJECT@
 PTHREAD_CC = @PTHREAD_CC@
 PTHREAD_CFLAGS = @PTHREAD_CFLAGS@
@@ -484,7 +485,9 @@ AM_CPPFLAGS = -I$(top_srcdir)
 salloc_SOURCES = salloc.c salloc.h opt.c opt.h
 convenience_libs = $(LIB_SLURM) $(DL_LIBS)
 salloc_DEPENDENCIES = $(LIB_SLURM_BUILD)
-salloc_LDADD = $(convenience_libs) $(am__append_1)
+salloc_LDADD = \
+	$(convenience_libs)
+
 salloc_LDFLAGS = -export-dynamic $(CMD_LDFLAGS)
 all: all-am
 
