@@ -190,6 +190,24 @@ def install_packages():
 
 #END install_packages()
 
+def install_singularity():
+
+    singularity = """
+yum groupinstall -y 'Development Tools' && \
+yum install -y libarchive-devel
+VER=2.5.2
+wget https://github.com/singularityware/singularity/releases/download/$VER/singularity-$VER.tar.gz
+tar xvf singularity-$VER.tar.gz
+cd singularity-$VER
+./configure --prefix=/usr/local --sysconfdir=/etc
+make
+sudo make install
+"""
+
+    while subprocess.call(singularity, shell=True):
+        print "falied to install singularity Trying again in 5 seconds"
+        time.sleep(5)
+
 def setup_munge():
 
     f = open('/etc/munge/munge.key', 'w')
@@ -815,6 +833,10 @@ def main():
         install_compute_service_scripts()
         subprocess.call(shlex.split('systemctl enable slurmd'))
         subprocess.call(shlex.split('systemctl start slurmd'))
+        install_singularity()
+    else:
+        install_singularity()
+
 
     end_motd()
 
