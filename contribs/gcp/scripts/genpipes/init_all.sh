@@ -1,4 +1,4 @@
-#!/bin/bash
+c!/bin/bash
 # This script loads the mugqic stack in on the host via the
 # cctools's parrot's cvmfs options
 # For more details on cvmfs and the parrot connector got to:
@@ -81,8 +81,8 @@ cvmfs2 ref.mugqic   /cvmfs/ref.mugqic
 
 # load genpipes
 if [  ${genpipe_script}  ]; then
-   bash --rcfile /usr/local/etc/genpiperc -ic ${genpipe_script}
+   bash --rcfile /usr/local/etc/genpipesrc -ic ${genpipe_script}
 else 
-   bash --rcfile /usr/local/etc/genpiperc 
+   bash --rcfile /usr/local/etc/genpipesrc 
 fi
 
