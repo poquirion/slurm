@@ -38,4 +38,5 @@ resources:
     default_account         : default
     default_users           : pierre_olivier_quirion
     munge_key               : 937c479406fd444ad696292c5af32bf733ab2611e4eeadd927def130e7706ea679ee4dd1160ad913c2076e7e8e3f759979addd2a06e8e3ddbbbb15d3afcce719
+    cvmfs_alien_cache       : /app/cvmfs-cache
 #  [END cluster_yaml]

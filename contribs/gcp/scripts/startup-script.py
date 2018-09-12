@@ -40,6 +40,8 @@ EXTERNAL_COMPUTE_IPS = @EXTERNAL_COMPUTE_IPS@
 
 SLURM_PREFIX  = APPS_DIR + '/slurm/slurm-' + SLURM_VERSION
 
+CVMFS_ALIEN_CACHE      = '@CVMFS_ALIEN_CACHE@'
+
 MOTD_HEADER = '''
 
                                  SSSSSSS
@@ -274,11 +276,15 @@ yum install -y cvmfs.x86_64 wget unzip.x86_64 make.x86_64 gcc expectk dejagnu le
 cp cvmfs-config.computecanada.ca.pub /etc/cvmfs/keys/.
 echo user_allow_other >> /etc/fuse.conf 
 cp *.conf /etc/cvmfs/config.d/.
-mkdir /cvmfs-cache 
-chmod 777 /cvmfs-cache 
+mkdir -p {0}
+chmod 777 {0}
 mkdir /cvmfs/{ref.mugqic,soft.mugqic,cvmfs-config.computecanada.ca} 
 chmod 777 /cvmfs/{ref.mugqic,soft.mugqic,cvmfs-config.computecanada.ca}  
 mkdir  /var/run/cvmfs   && chmod 777  /run/cvmfs && chmod 777  /var/run/cvmfs && chmod 777 /var/lib/cvmfs
+echo CVMFS_CACHE_BASE={0} >>  /etc/cvmfs/default.local
+echo  CVMFS_QUOTA_LIMIT=-1 >>  /etc/cvmfs/default.local
+echo CVMFS_SHARED_CACHE=no  >>  /etc/cvmfs/default.local
+
 
 # module
 MODULE_VERSION=4.1.2
@@ -299,7 +305,7 @@ mount -t cvmfs soft.mugqic    /cvmfs/soft.mugqic
 mount  -t cvmfs ref.mugqic   /cvmfs/ref.mugqic
 
 
-"""
+""".format(CVMFS_ALIEN_CACHE)
 
     while subprocess.call(genpipes, shell=True):
         print "falied to install singularity Trying again in 5 seconds"
