@@ -212,9 +212,8 @@ jQIDAQAB
 -----END PUBLIC KEY-----
 EOF
 
-cat > genpipesrc <<- EOF 
-source /etc/bashrc
-source ~/.bashrc
+cat > genpipes.sh <<- EOF 
+MUGQIC_INSTALL_HOME=/cvmfs/soft.mugqic/CentOS6
 echo -e "\nWait while Genpipes module are loaded. This could take a while,"
 echo -e   "  especially if the cvmfs cache is new\n"
 module use $MUGQIC_INSTALL_HOME/modulefiles
@@ -292,12 +291,13 @@ echo "source /etc/profile.d/z00_module.sh" >>  /etc/bashrc
 rm -rf /usr/local/Modules/modulefiles/*
 cp dev_genpipes "/usr/local/Modules/modulefiles/."
 
+cp genpipes.sh /etc/profile.d/genpipes.sh
+echo "source /etc/profile.d/genpipes.sh" >>    /etc/bashrc
+
 mount -t cvmfs  cvmfs-config.computecanada.ca   /cvmfs/cvmfs-config.computecanada.ca
 mount -t cvmfs soft.mugqic    /cvmfs/soft.mugqic
 mount  -t cvmfs ref.mugqic   /cvmfs/ref.mugqic
 
-cp genpipesrc    /etc/profile.d/genpipes.sh
-echo source /etc/profile.d/genpipes.sh >>    /etc/bash.bashrc
 
 """
 
