@@ -229,12 +229,12 @@ CVMFS_SERVER_URL="http://cvmfs-s1-east.computecanada.ca:8000/cvmfs/@fqrn@;http:/
 CVMFS_PUBLIC_KEY="/etc/cvmfs/keys/cvmfs-config.computecanada.ca.pub"
 CVMFS_USE_GEOAPI=yes
 EOF
-cat > ref.mugqic <<- EOF
+cat > ref.mugqic.conf <<- EOF
 CVMFS_SERVER_URL="http://cvmfs-s0-genomic.vhost38.genap.ca/cvmfs/@fqrn@"
 CVMFS_KEYS_DIR=/cvmfs/cvmfs-config.computecanada.ca/etc/cvmfs/keys/mugqic
 CVMFS_HTTP_PROXY=DIRECT
 EOF
-cat > soft.mugqic <<- EOF
+cat > soft.mugqic.conf <<- EOF
 CVMFS_SERVER_URL="http://cvmfs-s0-genomic.vhost38.genap.ca/cvmfs/@fqrn@"
 CVMFS_KEYS_DIR=/cvmfs/cvmfs-config.computecanada.ca/etc/cvmfs/keys/mugqic
 CVMFS_HTTP_PROXY=DIRECT
@@ -269,15 +269,16 @@ prepend-path    PATH                  $root/pipelines/hicseq
 EOF
 
 # All yum cmd
-yum install -y  https://ecsft.cern.ch/dist/cvmfs/cvmfs-release/cvmfs-release-2-6.noarch.rpm \
-  && yum install -y cvmfs.x86_64 wget unzip.x86_64 make.x86_64 gcc expectk dejagnu less tcl-devel.x86_64
+yum install -y  https://ecsft.cern.ch/dist/cvmfs/cvmfs-release/cvmfs-release-2-6.noarch.rpm 
+yum install -y cvmfs.x86_64 wget unzip.x86_64 make.x86_64 gcc expectk dejagnu less tcl-devel.x86_64
 
 cp cvmfs-config.computecanada.ca.pub /etc/cvmfs/keys/.
 echo user_allow_other >> /etc/fuse.conf 
-# adding local config to containe. These will overwrite the cvmfs-config.computecanada ones
 cp *.conf /etc/cvmfs/config.d/.
-mkdir /cvmfs-cache && chmod 777 /cvmfs-cache \
-mkdir /cvmfs/{ref.mugqic,soft.mugqic,cvmfs-config.computecanada.ca} && chmod 777 /cvmfs/{ref.mugqic,soft.mugqic,cvmfs-config.computecanada.ca}  \
+mkdir /cvmfs-cache 
+chmod 777 /cvmfs-cache 
+mkdir /cvmfs/{ref.mugqic,soft.mugqic,cvmfs-config.computecanada.ca} 
+chmod 777 /cvmfs/{ref.mugqic,soft.mugqic,cvmfs-config.computecanada.ca}  
 mkdir  /var/run/cvmfs   && chmod 777  /run/cvmfs && chmod 777  /var/run/cvmfs && chmod 777 /var/lib/cvmfs
 
 # module
