@@ -20,6 +20,8 @@ of the Slurm contribs distribution follows:
      pam_job.c             - Less verbose version of the default Cray job service.
 
   gcp/               [Google Cloud Platform integration scripts]
+  
+  gcp_genpipes/      [Google Cloud Platform integration of slurm and gcp scripts]
 
   lua/               [ LUA scripts ]
      Example LUA scripts that can serve as Slurm plugins.
