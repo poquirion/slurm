@@ -196,7 +196,7 @@ def install_genpipes():
 
     genpipes = """
 START_DIR=$PWD
-TMP_DIR = $(mktemp -d)
+TMP_DIR=$(mktemp -d)
 cd $TMP_DIR
 function finish {{
   cd $START_DIR
