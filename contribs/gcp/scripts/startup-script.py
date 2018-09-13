@@ -197,9 +197,9 @@ def install_genpipes():
     genpipes = """
 START_DIR=$PWD
 cd $(mktemp -d)
-function finish {
+function finish {{
   cd $START_DIR
-}
+}}
 trap finish EXIT
 
 cat > cvmfs-config.computecanada.ca.pub <<- EOF 
@@ -220,7 +220,7 @@ echo -e "\nWait while Genpipes module are loaded. This could take a while,"
 echo -e   "  especially if the cvmfs cache is new\n"
 module use \$MUGQIC_INSTALL_HOME/modulefiles
 module load mugqic/python/2.7.14
-module load mugqic/genpipes${PIPELINE_VERSION}
+module load mugqic/genpipes${{PIPELINE_VERSION}}
 EOF
 
 
@@ -243,17 +243,17 @@ EOF
 
 cat > dev_genpipes <<- EOF
 #%Module1.0
-proc ModulesHelp { } {
+proc ModulesHelp {{ }} {{
 
   puts stderr "\tDev - genpipes  "  
-}
+}}
 module-whatis "genpipes"
 set             root                  \$env(GENPIPES_DEV_DIR)
-if { [ module-info mode load ] } {
+if {{ [ module-info mode load ] }} {{
     puts stderr "unloading mugqic/genpipes"
     module unload mugqic/genpipes
     puts stderr "Load GENPIPES available in '$root'"
-}
+}}
 setenv          MUGQIC_PIPELINES_HOME \$root
 prepend-path    PATH                  \$root/utils
 prepend-path    PATH                  \$root/pipelines/ampliconseq
@@ -278,8 +278,8 @@ echo user_allow_other >> /etc/fuse.conf
 cp *.conf /etc/cvmfs/config.d/.
 mkdir -p {0}
 chmod 777 {0}
-mkdir /cvmfs/{ref.mugqic,soft.mugqic,cvmfs-config.computecanada.ca} 
-chmod 777 /cvmfs/{ref.mugqic,soft.mugqic,cvmfs-config.computecanada.ca}  
+mkdir /cvmfs/{{ref.mugqic,soft.mugqic,cvmfs-config.computecanada.ca}} 
+chmod 777 /cvmfs/{{ref.mugqic,soft.mugqic,cvmfs-config.computecanada.ca}}  
 mkdir  /var/run/cvmfs   && chmod 777  /run/cvmfs && chmod 777  /var/run/cvmfs && chmod 777 /var/lib/cvmfs
 echo CVMFS_CACHE_BASE={0} >>  /etc/cvmfs/default.local
 echo  CVMFS_QUOTA_LIMIT=-1 >>  /etc/cvmfs/default.local
@@ -288,10 +288,10 @@ echo CVMFS_SHARED_CACHE=no  >>  /etc/cvmfs/default.local
 
 # module
 MODULE_VERSION=4.1.2
-wget https://github.com/cea-hpc/modules/releases/download/v${MODULE_VERSION}/modules-${MODULE_VERSION}.tar.gz 
-tar xzf modules-${MODULE_VERSION}.tar.gz && \
-    rm modules-${MODULE_VERSION}.tar.gz
-cd  modules-${MODULE_VERSION}  && ./configure && make -j 7  && make install
+wget https://github.com/cea-hpc/modules/releases/download/v${{MODULE_VERSION}}/modules-${{MODULE_VERSION}}.tar.gz 
+tar xzf modules-${{MODULE_VERSION}}.tar.gz && \
+    rm modules-${{MODULE_VERSION}}.tar.gz
+cd  modules-${{MODULE_VERSION}}  && ./configure && make -j 7  && make install
 ln -s /usr/local/Modules/init/profile.sh /etc/profile.d/z00_module.sh
 echo "source /etc/profile.d/z00_module.sh" >>  /etc/bashrc
 rm -rf /usr/local/Modules/modulefiles/*
