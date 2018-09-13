@@ -214,7 +214,7 @@ jQIDAQAB
 -----END PUBLIC KEY-----
 EOF
 
-cat > genpipes.sh <<- EOF 
+cat > /etc/profile.d/genpipes.sh <<- EOF 
 MUGQIC_INSTALL_HOME=/cvmfs/soft.mugqic/CentOS6
 echo -e "\nWait while Genpipes module are loaded. This could take a while,"
 echo -e   "  especially if the cvmfs cache is new\n"
@@ -241,7 +241,9 @@ CVMFS_KEYS_DIR=/cvmfs/cvmfs-config.computecanada.ca/etc/cvmfs/keys/mugqic
 CVMFS_HTTP_PROXY=DIRECT
 EOF
 
-cat > dev_genpipes <<- EOF
+mkdir -p /usr/local/Modules/modulefiles/
+
+cat > /usr/local/Modules/modulefiles/dev_genpipes <<- EOF
 #%Module1.0
 proc ModulesHelp {{ }} {{
 
@@ -294,10 +296,7 @@ tar xzf modules-${{MODULE_VERSION}}.tar.gz && \
 cd  modules-${{MODULE_VERSION}}  && ./configure && make -j 7  && make install
 ln -s /usr/local/Modules/init/profile.sh /etc/profile.d/z00_module.sh
 echo "source /etc/profile.d/z00_module.sh" >>  /etc/bashrc
-rm -rf /usr/local/Modules/modulefiles/*
-cp dev_genpipes "/usr/local/Modules/modulefiles/."
 
-cp genpipes.sh /etc/profile.d/genpipes.sh
 echo "source /etc/profile.d/genpipes.sh" >>    /etc/bashrc
 
 mount -t cvmfs  cvmfs-config.computecanada.ca   /cvmfs/cvmfs-config.computecanada.ca
