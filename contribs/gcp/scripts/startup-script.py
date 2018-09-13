@@ -216,7 +216,7 @@ jQIDAQAB
 EOF
 
 cat > genpipes.sh <<- EOF 
-MUGQIC_INSTALL_HOME=/cvmfs/soft.mugqic/CentOS6
+export MUGQIC_INSTALL_HOME=/cvmfs/soft.mugqic/CentOS6
 echo -e "\nWait while Genpipes module are loaded. This could take a while,"
 echo -e   "  especially if the cvmfs cache is new\n"
 module use \$MUGQIC_INSTALL_HOME/modulefiles
@@ -295,14 +295,12 @@ tar xzf modules-${{MODULE_VERSION}}.tar.gz && \
 cd  modules-${{MODULE_VERSION}}  && ./configure && make -j 7  && make install
 cd $TMP_DIR
 ln -s /usr/local/Modules/init/profile.sh /etc/profile.d/z00_module.sh
-echo "source /etc/profile.d/z00_module.sh" >>  /etc/bashrc
 
 rm -rf /usr/local/Modules/modulefiles/*
 
 cp dev_genpipes "/usr/local/Modules/modulefiles/."
 
-cp genpipes.sh /etc/profile.d/genpipes.sh
-echo "source /etc/profile.d/genpipes.sh" >>    /etc/bashrc
+cp genpipes.sh /etc/profile.d/z10_genpipes.sh
 
 mount -t cvmfs  cvmfs-config.computecanada.ca   /cvmfs/cvmfs-config.computecanada.ca
 mount -t cvmfs soft.mugqic    /cvmfs/soft.mugqic
